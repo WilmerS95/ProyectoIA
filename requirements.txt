@@ -1,3 +1,6 @@
+protobuf
+streamlit
+langchain-google-genai
 crewai
 langchain-nvidia-ai-endpoints
 python-dotenv
