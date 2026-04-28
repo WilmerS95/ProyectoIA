@@ -1,7 +1,7 @@
 import streamlit as st
 import os
 import tempfile
-from main import calificar_examen_ui
+from main import calificar_examen_ui, extraer_texto_imagen
 
 st.set_page_config(page_title="Calificador de Exámenes IA", page_icon="📝", layout="wide")
 
@@ -37,21 +37,27 @@ if st.button("Iniciar Calificación Autónoma", use_container_width=True, type="
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_img:
                 tmp_img.write(archivo_examen.getvalue())
                 ruta_img = tmp_img.name
+                st.text_area("Texto OCR (debug)1", extraer_texto_imagen(ruta_img), height=200)
 
             try:
                 # Llamamos a la lógica de CrewAI
                 resultado = calificar_examen_ui(ruta_img, ruta_pdf, dificultad)
+                st.text_area("Texto OCR (debug)2", extraer_texto_imagen(ruta_img), height=200)
 
                 st.success("¡Calificación completada!")
 
                 # Mostrar el resultado en pantalla
                 st.subheader("Reporte de Calificación")
-                st.markdown(resultado.raw) # CrewAI devuelve un objeto, usamos .raw para el texto
+                if hasattr(resultado, "raw"):
+                    st.markdown(resultado.raw)
+                else:
+                    st.markdown(resultado)
+                #st.markdown(resultado) # CrewAI devuelve un objeto, usamos .raw para el texto
 
                 # Opción para descargar el reporte
                 st.download_button(
                     label="Descargar Reporte (TXT)",
-                    data=resultado.raw,
+                    data=resultado,
                     file_name="reporte_calificacion.txt",
                     mime="text/plain"
                 )
