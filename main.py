@@ -12,8 +12,8 @@ clave_nvidia = os.getenv("NVIDIA_API_KEY")
 os.environ["OPENAI_API_KEY"] = clave_nvidia
 os.environ["OPENAI_API_BASE"] = "https://integrate.api.nvidia.com/v1"
 
-llm_vision = "openai/meta/llama-3.2-11b-vision-instruct"
-llm_grader = "openai/meta/llama-3.1-70b-instruct"
+llm_vision = "openai/meta/llama-3.2-11b-vision-instruct"  
+llm_grader = "openai/meta/llama-3.1-70b-instruct" 
 llm_reporter = "openai/meta/llama-3.1-8b-instruct"
 
 
