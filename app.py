@@ -4,168 +4,319 @@ from pathlib import Path
 
 import streamlit as st
 
-from main import calificar_examen_ui, extraer_texto_imagen_gemini
+from main import calificar_examen_ui, extraer_texto_imagen
 
+
+# =========================================================
+# CONFIGURACIÓN GENERAL
+# =========================================================
 
 st.set_page_config(
     page_title="Calificador de Exámenes IA",
-    page_icon="📝",
+    page_icon="🧠",
     layout="wide"
 )
 
-st.title("Sistema Inteligente Multimodal para la Calificación Autónoma")
+
+# =========================================================
+# SESSION STATE
+# =========================================================
+
+if "resultado" not in st.session_state:
+    st.session_state.resultado = None
+
+if "texto_extraido" not in st.session_state:
+    st.session_state.texto_extraido = None
+
+if "archivos_contexto" not in st.session_state:
+    st.session_state.archivos_contexto = []
+
+if "archivo_examen" not in st.session_state:
+    st.session_state.archivo_examen = None
+
+if "ultima_dificultad" not in st.session_state:
+    st.session_state.ultima_dificultad = 5
+
+
+# =========================================================
+# ESTILOS
+# =========================================================
 
 st.markdown(
     """
-    Sube uno o varios materiales de clase y una imagen del examen resuelto.
-    El sistema analizará la imagen con Gemini, buscará el contexto más relevante con RAG
-    y generará una calificación profesional por pregunta.
-    """
+<style>
+.block-container {
+    padding-top: 2rem;
+    padding-bottom: 2rem;
+}
+
+.stButton > button {
+    width: 100%;
+    border-radius: 12px;
+    height: 3.1rem;
+    border: none;
+    background: linear-gradient(90deg, #ff4b4b, #ff2e63);
+    color: white;
+    font-size: 17px;
+    font-weight: bold;
+}
+
+.stButton > button:hover {
+    background: linear-gradient(90deg, #ff2e63, #ff4b4b);
+}
+
+.result-box {
+    background-color: #0f172a;
+    padding: 24px;
+    border-radius: 16px;
+    border: 1px solid #334155;
+    margin-top: 20px;
+    line-height: 1.6;
+}
+
+.small-muted {
+    color: #94a3b8;
+    font-size: 14px;
+}
+</style>
+""",
+    unsafe_allow_html=True
 )
 
-with st.expander("¿Cómo funciona el sistema?", expanded=False):
-    st.markdown(
-        """
-        **Flujo del sistema:**
 
-        1. Gemini lee la imagen del examen y extrae preguntas y respuestas.
-        2. Los materiales del profesor se dividen en fragmentos.
-        3. RAG busca los fragmentos más relacionados con el examen.
-        4. El agente calificador evalúa cada respuesta.
-        5. Se genera un informe con puntuación, justificación y retroalimentación.
-        """
-    )
+# =========================================================
+# ENCABEZADO
+# =========================================================
+
+st.title("🧠 Calificador de Exámenes IA")
+st.markdown(
+    "Sistema inteligente de evaluación automática con análisis contextual, RAG y razonamiento académico."
+)
+
+st.divider()
+
+
+# =========================================================
+# SUBIDA DE ARCHIVOS
+# =========================================================
 
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("1. Material de Clase")
+    st.markdown("## 📚 Materiales de referencia")
+
     archivos_contexto = st.file_uploader(
-        "Sube materiales de referencia",
+        "Sube uno o varios archivos del profesor",
         type=["pdf", "txt", "md", "docx"],
         accept_multiple_files=True,
-        help="Puedes subir uno o varios archivos: PDF, TXT, MD o DOCX."
+        key="uploader_contexto"
     )
 
-    if archivos_contexto:
-        st.caption(f"Archivos cargados: {len(archivos_contexto)}")
-        for archivo in archivos_contexto:
-            st.write(f"📄 {archivo.name}")
+    st.caption("Puedes subir PDFs, documentos TXT, Markdown o DOCX.")
 
 with col2:
-    st.subheader("2. Examen del Estudiante")
+    st.markdown("## 🖼️ Examen del estudiante")
+
     archivo_examen = st.file_uploader(
-        "Sube la foto o escaneo del examen resuelto",
+        "Sube la foto o escaneo del examen",
         type=["jpg", "jpeg", "png"],
-        help="Debe ser una imagen clara del examen ya respondido."
+        accept_multiple_files=False,
+        key="uploader_examen"
     )
 
-    if archivo_examen:
-        st.caption(f"Imagen cargada: {archivo_examen.name}")
-        st.image(archivo_examen, caption="Vista previa del examen", use_container_width=True)
+    st.caption("Formatos permitidos: JPG, JPEG y PNG.")
+
+
+# =========================================================
+# GUARDAR ARCHIVOS EN SESSION_STATE
+# =========================================================
+
+if archivos_contexto:
+    st.session_state.archivos_contexto = archivos_contexto
+
+if archivo_examen:
+    st.session_state.archivo_examen = archivo_examen
+
+
+# =========================================================
+# MOSTRAR ARCHIVOS ACTUALES
+# =========================================================
+
+if st.session_state.archivos_contexto or st.session_state.archivo_examen:
+    st.markdown("### 📌 Archivos cargados actualmente")
+
+    if st.session_state.archivos_contexto:
+        st.write("**Materiales de referencia:**")
+        for archivo in st.session_state.archivos_contexto:
+            st.write(f"📄 {archivo.name}")
+
+    if st.session_state.archivo_examen:
+        st.write("**Examen:**")
+        st.write(f"🖼️ {st.session_state.archivo_examen.name}")
 
 st.divider()
 
-st.subheader("3. Configuración de Calificación")
 
-dificultad = st.slider(
+# =========================================================
+# CONFIGURACIÓN DE CALIFICACIÓN
+# =========================================================
+
+st.markdown("## ⚙️ Configuración de Calificación")
+
+nivel_dificultad = st.slider(
     "Nivel de dificultad",
     min_value=1,
     max_value=10,
-    value=5,
-    help="1 = más flexible, 10 = más estricto."
+    value=st.session_state.ultima_dificultad
 )
 
-if dificultad <= 3:
-    st.info(
-        "Modo flexible: acepta respuestas equivalentes, errores menores de redacción "
-        "y comprensión general del tema."
-    )
-elif dificultad <= 7:
-    st.info(
-        "Modo estándar: exige conceptos correctos, relación con el material "
-        "y explicación suficiente."
-    )
+st.session_state.ultima_dificultad = nivel_dificultad
+
+if nivel_dificultad <= 2:
+    st.info("Modo muy flexible: acepta ideas generales y conceptos básicos.")
+
+elif nivel_dificultad <= 4:
+    st.info("Modo flexible: prioriza comprensión general sobre precisión técnica.")
+
+elif nivel_dificultad <= 6:
+    st.info("Modo estándar: exige conceptos correctos y explicación suficiente.")
+
+elif nivel_dificultad <= 8:
+    st.warning("Modo estricto: exige precisión conceptual, profundidad y claridad.")
+
 else:
-    st.warning(
-        "Modo estricto: exige precisión conceptual, claridad, completitud "
-        "y relación directa con el material."
-    )
+    st.error("Modo muy estricto: evaluación rigurosa y técnica.")
 
-mostrar_extraccion = st.checkbox(
-    "Mostrar extracción inicial de la imagen",
-    value=False,
-    help="Muestra lo que Gemini detectó antes de calificar."
-)
+mostrar_ocr = st.checkbox("Mostrar extracción inicial de la imagen")
 
 st.divider()
 
-if st.button("Iniciar Calificación Autónoma", use_container_width=True, type="primary"):
-    if not archivos_contexto:
-        st.warning("Por favor, sube al menos un archivo de contexto.")
+
+# =========================================================
+# BOTONES
+# =========================================================
+
+col_btn1, col_btn2 = st.columns([4, 1])
+
+with col_btn1:
+    iniciar = st.button("🚀 Iniciar Calificación Autónoma")
+
+with col_btn2:
+    limpiar = st.button("🗑️ Limpiar")
+
+
+# =========================================================
+# LIMPIAR
+# =========================================================
+
+if limpiar:
+    st.session_state.resultado = None
+    st.session_state.texto_extraido = None
+    st.session_state.archivos_contexto = []
+    st.session_state.archivo_examen = None
+    st.rerun()
+
+
+# =========================================================
+# PROCESO PRINCIPAL
+# =========================================================
+
+if iniciar:
+
+    if not st.session_state.archivos_contexto:
+        st.warning("⚠️ Debes subir al menos un archivo de referencia.")
         st.stop()
 
-    if archivo_examen is None:
-        st.warning("Por favor, sube la imagen del examen.")
+    if st.session_state.archivo_examen is None:
+        st.warning("⚠️ Debes subir el examen del estudiante.")
         st.stop()
 
     rutas_contexto = []
-    ruta_img = None
+    ruta_examen = None
 
-    with st.spinner(
-        "Analizando examen, construyendo RAG y generando reporte... Esto puede tomar unos minutos."
-    ):
-        try:
-            for archivo in archivos_contexto:
-                extension = Path(archivo.name).suffix.lower()
+    try:
+        with st.spinner("🔎 Analizando examen y material académico..."):
 
-                with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as tmp:
-                    tmp.write(archivo.getvalue())
+            # Guardar archivos de contexto temporalmente
+            for archivo in st.session_state.archivos_contexto:
+                archivo.seek(0)
+                suffix = Path(archivo.name).suffix
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    tmp.write(archivo.read())
                     rutas_contexto.append(tmp.name)
 
-            extension_img = Path(archivo_examen.name).suffix.lower()
+            # Guardar imagen del examen temporalmente
+            st.session_state.archivo_examen.seek(0)
+            suffix_exam = Path(st.session_state.archivo_examen.name).suffix
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=extension_img) as tmp_img:
-                tmp_img.write(archivo_examen.getvalue())
-                ruta_img = tmp_img.name
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix_exam) as tmp_exam:
+                tmp_exam.write(st.session_state.archivo_examen.read())
+                ruta_examen = tmp_exam.name
 
-            if mostrar_extraccion:
-                with st.spinner("Extrayendo preguntas y respuestas desde la imagen..."):
-                    texto_extraido = extraer_texto_imagen_gemini(ruta_img)
+            # OCR opcional
+            if mostrar_ocr:
+                texto_extraido = extraer_texto_imagen(ruta_examen)
+                st.session_state.texto_extraido = texto_extraido
 
-                st.subheader("Extracción inicial de la imagen")
-                st.text_area(
-                    "Preguntas y respuestas detectadas por Gemini",
-                    texto_extraido,
-                    height=260
-                )
-
+            # Calificación
             resultado = calificar_examen_ui(
-                ruta_imagen=ruta_img,
+                ruta_imagen=ruta_examen,
                 rutas_contexto=rutas_contexto,
-                nivel_dificultad=dificultad
+                nivel_dificultad=nivel_dificultad
             )
 
-            st.success("¡Calificación completada!")
+            st.session_state.resultado = resultado
 
-            st.subheader("Reporte de Calificación")
-            st.markdown(resultado)
+        st.success("✅ Calificación completada correctamente.")
 
-            st.download_button(
-                label="Descargar Reporte (TXT)",
-                data=resultado,
-                file_name="reporte_calificacion.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
+    except Exception as e:
+        st.error(f"❌ Ocurrió un error durante la calificación:\n\n{e}")
 
-        except Exception as e:
-            st.error(f"Ocurrió un error durante la calificación: {e}")
+    finally:
+        try:
+            if ruta_examen and os.path.exists(ruta_examen):
+                os.remove(ruta_examen)
 
-        finally:
             for ruta in rutas_contexto:
                 if ruta and os.path.exists(ruta):
                     os.remove(ruta)
 
-            if ruta_img and os.path.exists(ruta_img):
-                os.remove(ruta_img)
+        except Exception:
+            pass
+
+
+# =========================================================
+# MOSTRAR OCR
+# =========================================================
+
+if mostrar_ocr and st.session_state.texto_extraido:
+    st.divider()
+    st.markdown("## 🧾 Extracción inicial de la imagen")
+
+    st.text_area(
+        "Preguntas y respuestas detectadas",
+        value=st.session_state.texto_extraido,
+        height=350
+    )
+
+
+# =========================================================
+# MOSTRAR RESULTADO
+# =========================================================
+
+if st.session_state.resultado:
+    st.divider()
+    st.markdown("## 📑 Informe de Calificación")
+
+    resultado_texto = str(st.session_state.resultado)
+
+    st.markdown(resultado_texto)
+
+    st.download_button(
+        label="⬇️ Descargar Reporte",
+        data=resultado_texto,
+        file_name="reporte_calificacion.md",
+        mime="text/markdown",
+        width="stretch"
+    )
