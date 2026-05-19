@@ -5,6 +5,7 @@ import hashlib
 import time
 from pathlib import Path
 from dataclasses import dataclass, asdict
+from typing import Optional
 
 import chromadb
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
@@ -51,7 +52,7 @@ RAG_DIR.mkdir(exist_ok=True)
 class PreguntaExamen:
     id_global: int
     serie: str
-    numero_local: int | None
+    numero_local: Optional[int]
     bloque: str
     valor: float
 
@@ -96,7 +97,7 @@ def guardar_json_cache(nombre, data):
 
 
 # ============================================================
-# CLIENTE GEMINI — SIN CREWAI
+# GEMINI DIRECTO
 # ============================================================
 
 def llamar_gemini(prompt: str, imagen_bytes: bytes = None, mime_type: str = None) -> str:
@@ -133,7 +134,7 @@ def llamar_gemini(prompt: str, imagen_bytes: bytes = None, mime_type: str = None
 
 
 # ============================================================
-# OCR / ICR GEMINI
+# OCR / ICR
 # ============================================================
 
 OCR_PROMPT = """
@@ -146,18 +147,31 @@ Debes leer TODA la imagen:
 - series
 - preguntas
 - respuestas del estudiante
-- valores de cada serie o pregunta
+- valores de cada serie
+- valores de cada pregunta
 
 REGLAS IMPORTANTES:
 1. No inventes preguntas.
 2. No inventes respuestas.
 3. Si hay tabla de puntuación, úsala como fuente principal.
 4. Si arriba dice algo como 15/100 pero la tabla indica Serie 1, Serie 2 y Total, usa la tabla.
-5. Conserva el orden real.
+5. Conserva el orden real del examen.
 6. Si algo no se entiende, escribe "No legible".
 7. Extrae preguntas y respuestas de forma clara.
 8. Si una pregunta dice "(1 punto)", "(2 puntos)", etc., extrae ese valor.
-9. No confundas la tabla de escala con los valores individuales de preguntas.
+9. No confundas escala de calificación con valor real del examen.
+10. No ignores textos pequeños donde diga "Valor 10 puntos", "Valor 5 puntos", "1 punto", etc.
+
+OBLIGATORIO PARA PUNTEO:
+- Si ves "PRIMERA SERIE: Valor 10 puntos", escribe exactamente:
+Serie 1: 10
+- Si ves "SEGUNDA SERIE: Valor 5 puntos", escribe exactamente:
+Serie 2: 5
+- Si ves "Total 15", escribe exactamente:
+Total: 15
+- Si una pregunta dice "(1 punto)", escribe:
+Puntos indicados en la pregunta: 1
+- Nunca ignores los valores aunque estén pequeños o al lado del título.
 
 Devuelve exactamente este formato:
 
@@ -286,7 +300,7 @@ ARCHIVO: {Path(ruta).name}
 
 
 # ============================================================
-# RÚBRICA
+# RÚBRICA Y PUNTEO
 # ============================================================
 
 def normalizar_numero(valor):
@@ -308,6 +322,10 @@ def buscar_numero_patron(texto, patrones):
                 return numero
 
     return None
+
+
+def contar_preguntas_ocr(texto_examen: str) -> int:
+    return len(re.findall(r"Pregunta\s+\d+\s*:", texto_examen, flags=re.IGNORECASE))
 
 
 def detectar_rubrica(texto_examen: str) -> dict:
@@ -355,6 +373,16 @@ def detectar_rubrica(texto_examen: str) -> dict:
             "serie2": None,
             "total": total,
             "fuente": "total general detectado"
+        }
+
+    cantidad_preguntas = contar_preguntas_ocr(texto_examen)
+
+    if cantidad_preguntas > 0:
+        return {
+            "serie1": None,
+            "serie2": None,
+            "total": float(cantidad_preguntas),
+            "fuente": f"no se detectó tabla de puntuación; se asumió 1 punto por cada una de las {cantidad_preguntas} preguntas"
         }
 
     return {
@@ -892,7 +920,7 @@ Responde SOLO en Markdown:
 
 **Retroalimentación:** ...
 
-(Repite el bloque anterior para cada pregunta)
+Repite el bloque anterior para cada pregunta.
 
 ## Clasificación Final
 
@@ -920,7 +948,7 @@ Responde SOLO en Markdown:
 
 
 # ============================================================
-# FUNCIÓN DE CONVENIENCIA PARA APP.PY
+# FUNCIÓN PARA APP.PY
 # ============================================================
 
 def calificar_examen_ui(ruta_imagen: str, rutas_contexto: list, nivel_dificultad: int) -> str:
