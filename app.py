@@ -1,49 +1,23 @@
 import os
+import hashlib
 import tempfile
-from pathlib import Path
-
 import streamlit as st
 
-from main import calificar_examen_ui, extraer_texto_imagen
+from main import preparar_paquete_evaluacion, calificar_paquete
 
-
-# =========================================================
-# CONFIGURACIÓN GENERAL
-# =========================================================
 
 st.set_page_config(
-    page_title="Calificador de Exámenes IA",
+    page_title="Calificador Inteligente IA",
     page_icon="🧠",
     layout="wide"
 )
 
 
-# =========================================================
-# SESSION STATE
-# =========================================================
+# =========================
+# CSS
+# =========================
 
-if "resultado" not in st.session_state:
-    st.session_state.resultado = None
-
-if "texto_extraido" not in st.session_state:
-    st.session_state.texto_extraido = None
-
-if "archivos_contexto" not in st.session_state:
-    st.session_state.archivos_contexto = []
-
-if "archivo_examen" not in st.session_state:
-    st.session_state.archivo_examen = None
-
-if "ultima_dificultad" not in st.session_state:
-    st.session_state.ultima_dificultad = 5
-
-
-# =========================================================
-# ESTILOS
-# =========================================================
-
-st.markdown(
-    """
+st.markdown("""
 <style>
 .block-container {
     padding-top: 2rem;
@@ -52,53 +26,78 @@ st.markdown(
 
 .stButton > button {
     width: 100%;
-    border-radius: 12px;
-    height: 3.1rem;
-    border: none;
-    background: linear-gradient(90deg, #ff4b4b, #ff2e63);
-    color: white;
-    font-size: 17px;
+    border-radius: 14px;
+    padding: 14px;
+    font-size: 18px;
     font-weight: bold;
 }
 
-.stButton > button:hover {
-    background: linear-gradient(90deg, #ff2e63, #ff4b4b);
-}
-
-.result-box {
-    background-color: #0f172a;
-    padding: 24px;
-    border-radius: 16px;
-    border: 1px solid #334155;
+.result-card {
+    background: #111827;
+    border: 1px solid #374151;
+    border-radius: 18px;
+    padding: 25px;
     margin-top: 20px;
-    line-height: 1.6;
-}
-
-.small-muted {
-    color: #94a3b8;
-    font-size: 14px;
 }
 </style>
-""",
-    unsafe_allow_html=True
-)
+""", unsafe_allow_html=True)
 
 
-# =========================================================
-# ENCABEZADO
-# =========================================================
+# =========================
+# SESSION STATE
+# =========================
 
-st.title("🧠 Calificador de Exámenes IA")
-st.markdown(
-    "Sistema inteligente de evaluación automática con análisis contextual, RAG y razonamiento académico."
-)
+defaults = {
+    "paquete_cache": None,
+    "ultimo_hash": None,
+    "ultimo_resultado": None,
+    "ultima_dificultad": 5,
+    "mostrar_resultado": False,
+    "contextos_bytes": [],
+    "imagen_bytes": None,
+}
 
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+
+# =========================
+# FUNCIONES
+# =========================
+
+def hash_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def limpiar_markdown(texto: str) -> str:
+    return (
+        str(texto)
+        .replace("```markdown", "")
+        .replace("```", "")
+        .strip()
+    )
+
+
+def guardar_archivo_temporal(temp_dir, nombre, data):
+    ruta = os.path.join(temp_dir, nombre)
+    with open(ruta, "wb") as f:
+        f.write(data)
+    return ruta
+
+
+# =========================
+# HEADER
+# =========================
+
+st.markdown("# 🧠 Calificador Inteligente de Exámenes")
+st.markdown("OCR/ICR + RAG + IA + dificultad adaptable 1–10")
 st.divider()
 
 
-# =========================================================
-# SUBIDA DE ARCHIVOS
-# =========================================================
+# =========================
+# SUBIDA
+# =========================
 
 col1, col2 = st.columns(2)
 
@@ -106,216 +105,212 @@ with col1:
     st.markdown("## 📚 Materiales de referencia")
 
     archivos_contexto = st.file_uploader(
-        "Sube uno o varios archivos del profesor",
+        "Sube PDFs o documentos del profesor",
         type=["pdf", "txt", "md", "docx"],
         accept_multiple_files=True,
-        key="uploader_contexto"
+        key="uploader_contextos"
     )
-
-    st.caption("Puedes subir PDFs, documentos TXT, Markdown o DOCX.")
 
 with col2:
     st.markdown("## 🖼️ Examen del estudiante")
 
-    archivo_examen = st.file_uploader(
-        "Sube la foto o escaneo del examen",
-        type=["jpg", "jpeg", "png"],
-        accept_multiple_files=False,
-        key="uploader_examen"
+    imagen_examen = st.file_uploader(
+        "Sube una imagen del examen",
+        type=["png", "jpg", "jpeg"],
+        key="uploader_imagen"
     )
 
-    st.caption("Formatos permitidos: JPG, JPEG y PNG.")
 
-
-# =========================================================
-# GUARDAR ARCHIVOS EN SESSION_STATE
-# =========================================================
-
+# Guardar bytes para que no se pierdan al mover dificultad
 if archivos_contexto:
-    st.session_state.archivos_contexto = archivos_contexto
+    st.session_state.contextos_bytes = [
+        {
+            "name": archivo.name,
+            "bytes": archivo.getvalue()
+        }
+        for archivo in archivos_contexto
+    ]
 
-if archivo_examen:
-    st.session_state.archivo_examen = archivo_examen
+if imagen_examen:
+    st.session_state.imagen_bytes = {
+        "name": imagen_examen.name,
+        "bytes": imagen_examen.getvalue()
+    }
 
-
-# =========================================================
-# MOSTRAR ARCHIVOS ACTUALES
-# =========================================================
-
-if st.session_state.archivos_contexto or st.session_state.archivo_examen:
-    st.markdown("### 📌 Archivos cargados actualmente")
-
-    if st.session_state.archivos_contexto:
-        st.write("**Materiales de referencia:**")
-        for archivo in st.session_state.archivos_contexto:
-            st.write(f"📄 {archivo.name}")
-
-    if st.session_state.archivo_examen:
-        st.write("**Examen:**")
-        st.write(f"🖼️ {st.session_state.archivo_examen.name}")
 
 st.divider()
 
 
-# =========================================================
-# CONFIGURACIÓN DE CALIFICACIÓN
-# =========================================================
+# =========================
+# CONFIGURACIÓN
+# =========================
 
-st.markdown("## ⚙️ Configuración de Calificación")
+st.markdown("## ⚙️ Configuración")
 
 nivel_dificultad = st.slider(
     "Nivel de dificultad",
     min_value=1,
     max_value=10,
-    value=st.session_state.ultima_dificultad
+    value=st.session_state.ultima_dificultad,
+    step=1
 )
 
 st.session_state.ultima_dificultad = nivel_dificultad
 
 if nivel_dificultad <= 2:
-    st.info("Modo muy flexible: acepta ideas generales y conceptos básicos.")
-
+    st.info("🟢 Modo muy flexible")
 elif nivel_dificultad <= 4:
-    st.info("Modo flexible: prioriza comprensión general sobre precisión técnica.")
-
+    st.info("🟡 Modo flexible")
 elif nivel_dificultad <= 6:
-    st.info("Modo estándar: exige conceptos correctos y explicación suficiente.")
-
+    st.info("🔵 Modo estándar académico")
 elif nivel_dificultad <= 8:
-    st.warning("Modo estricto: exige precisión conceptual, profundidad y claridad.")
-
+    st.warning("🟠 Modo estricto")
 else:
-    st.error("Modo muy estricto: evaluación rigurosa y técnica.")
+    st.error("🔴 Modo experto riguroso")
 
-mostrar_ocr = st.checkbox("Mostrar extracción inicial de la imagen")
+mostrar_extraccion = st.checkbox("Mostrar extracción OCR", value=False)
 
 st.divider()
 
 
-# =========================================================
+# =========================
 # BOTONES
-# =========================================================
+# =========================
 
 col_btn1, col_btn2 = st.columns([4, 1])
 
 with col_btn1:
-    iniciar = st.button("🚀 Iniciar Calificación Autónoma")
+    iniciar = st.button("🚀 Calificar Examen")
 
 with col_btn2:
     limpiar = st.button("🗑️ Limpiar")
 
 
-# =========================================================
-# LIMPIAR
-# =========================================================
-
 if limpiar:
-    st.session_state.resultado = None
-    st.session_state.texto_extraido = None
-    st.session_state.archivos_contexto = []
-    st.session_state.archivo_examen = None
+    st.session_state.paquete_cache = None
+    st.session_state.ultimo_hash = None
+    st.session_state.ultimo_resultado = None
+    st.session_state.mostrar_resultado = False
+    st.session_state.contextos_bytes = []
+    st.session_state.imagen_bytes = None
     st.rerun()
 
 
-# =========================================================
-# PROCESO PRINCIPAL
-# =========================================================
+# =========================
+# PROCESO
+# =========================
 
 if iniciar:
 
-    if not st.session_state.archivos_contexto:
-        st.warning("⚠️ Debes subir al menos un archivo de referencia.")
+    if not st.session_state.contextos_bytes:
+        st.warning("Debes subir al menos un archivo de referencia.")
         st.stop()
 
-    if st.session_state.archivo_examen is None:
-        st.warning("⚠️ Debes subir el examen del estudiante.")
+    if st.session_state.imagen_bytes is None:
+        st.warning("Debes subir la imagen del examen.")
         st.stop()
-
-    rutas_contexto = []
-    ruta_examen = None
 
     try:
-        with st.spinner("🔎 Analizando examen y material académico..."):
+        hash_actual = hash_bytes(st.session_state.imagen_bytes["bytes"])
 
-            # Guardar archivos de contexto temporalmente
-            for archivo in st.session_state.archivos_contexto:
-                archivo.seek(0)
-                suffix = Path(archivo.name).suffix
+        for archivo in st.session_state.contextos_bytes:
+            hash_actual += hash_bytes(archivo["bytes"])
 
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(archivo.read())
-                    rutas_contexto.append(tmp.name)
+        hash_actual = hashlib.sha256(hash_actual.encode()).hexdigest()
 
-            # Guardar imagen del examen temporalmente
-            st.session_state.archivo_examen.seek(0)
-            suffix_exam = Path(st.session_state.archivo_examen.name).suffix
+        reutilizar_cache = (
+            st.session_state.paquete_cache is not None
+            and st.session_state.ultimo_hash == hash_actual
+        )
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix_exam) as tmp_exam:
-                tmp_exam.write(st.session_state.archivo_examen.read())
-                ruta_examen = tmp_exam.name
+        with tempfile.TemporaryDirectory() as temp_dir:
 
-            # OCR opcional
-            if mostrar_ocr:
-                texto_extraido = extraer_texto_imagen(ruta_examen)
-                st.session_state.texto_extraido = texto_extraido
-
-            # Calificación
-            resultado = calificar_examen_ui(
-                ruta_imagen=ruta_examen,
-                rutas_contexto=rutas_contexto,
-                nivel_dificultad=nivel_dificultad
+            ruta_imagen = guardar_archivo_temporal(
+                temp_dir,
+                st.session_state.imagen_bytes["name"],
+                st.session_state.imagen_bytes["bytes"]
             )
 
-            st.session_state.resultado = resultado
+            rutas_contexto = []
 
-        st.success("✅ Calificación completada correctamente.")
+            for archivo in st.session_state.contextos_bytes:
+                ruta = guardar_archivo_temporal(
+                    temp_dir,
+                    archivo["name"],
+                    archivo["bytes"]
+                )
+                rutas_contexto.append(ruta)
+
+            if reutilizar_cache:
+                st.success("♻️ Reutilizando OCR y RAG ya procesados.")
+                paquete = st.session_state.paquete_cache
+
+            else:
+                with st.spinner("🧠 Procesando OCR, rúbrica y RAG..."):
+                    paquete = preparar_paquete_evaluacion(
+                        ruta_imagen,
+                        rutas_contexto
+                    )
+
+                if "error" in paquete:
+                    st.error(paquete["error"])
+                    st.stop()
+
+                st.session_state.paquete_cache = paquete
+                st.session_state.ultimo_hash = hash_actual
+
+            if mostrar_extraccion:
+                with st.expander("📄 Texto extraído del examen"):
+                    st.text(paquete.get("texto_examen", ""))
+
+            with st.spinner("🤖 Calificando examen con IA..."):
+                resultado = calificar_paquete(
+                    paquete,
+                    nivel_dificultad
+                )
+
+            resultado = limpiar_markdown(resultado)
+
+            if not resultado:
+                st.error("La IA terminó, pero no devolvió un reporte válido al front.")
+                st.stop()
+
+            st.session_state.ultimo_resultado = resultado
+            st.session_state.mostrar_resultado = True
+
+            st.rerun()
 
     except Exception as e:
-        st.error(f"❌ Ocurrió un error durante la calificación:\n\n{e}")
-
-    finally:
-        try:
-            if ruta_examen and os.path.exists(ruta_examen):
-                os.remove(ruta_examen)
-
-            for ruta in rutas_contexto:
-                if ruta and os.path.exists(ruta):
-                    os.remove(ruta)
-
-        except Exception:
-            pass
+        st.error(f"Error general:\n\n{str(e)}")
 
 
-# =========================================================
-# MOSTRAR OCR
-# =========================================================
+# =========================
+# MOSTRAR RESULTADO SIEMPRE FUERA DEL BOTÓN
+# =========================
 
-if mostrar_ocr and st.session_state.texto_extraido:
+if st.session_state.mostrar_resultado and st.session_state.ultimo_resultado:
+
     st.divider()
-    st.markdown("## 🧾 Extracción inicial de la imagen")
 
-    st.text_area(
-        "Preguntas y respuestas detectadas",
-        value=st.session_state.texto_extraido,
-        height=350
-    )
-
-
-# =========================================================
-# MOSTRAR RESULTADO
-# =========================================================
-
-if st.session_state.resultado:
-    st.divider()
     st.markdown("## 📑 Informe de Calificación")
 
-    resultado_texto = str(st.session_state.resultado)
+    resultado_limpio = limpiar_markdown(st.session_state.ultimo_resultado)
 
-    st.markdown(resultado_texto)
+    st.markdown(
+        '<div class="result-card">',
+        unsafe_allow_html=True
+    )
+
+    st.markdown(resultado_limpio)
+
+    st.markdown(
+        '</div>',
+        unsafe_allow_html=True
+    )
 
     st.download_button(
         label="⬇️ Descargar Reporte",
-        data=resultado_texto,
+        data=resultado_limpio,
         file_name="reporte_calificacion.md",
         mime="text/markdown",
         width="stretch"
