@@ -38,10 +38,10 @@ MODELO_FALLBACK = "gemini-2.5-flash-lite"
 # ============================================================
 
 CACHE_DIR = Path(".cache_examenes")
-CACHE_DIR.mkdir(exist_ok=True)
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 RAG_DIR = Path(".rag_cache")
-RAG_DIR.mkdir(exist_ok=True)
+RAG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
@@ -590,7 +590,7 @@ def dividir_en_chunks(texto: str, tamano_chunk=900, solapamiento=120) -> list:
 def construir_rag_cache(rutas_contexto: list, texto_contexto: str):
     cache_id = hash_archivos(rutas_contexto)
     carpeta_cache = RAG_DIR / cache_id
-    carpeta_cache.mkdir(exist_ok=True)
+    carpeta_cache.mkdir(parents=True, exist_ok=True)
 
     embedding_function = SentenceTransformerEmbeddingFunction(
         model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
@@ -779,46 +779,77 @@ def obtener_criterio_dificultad(nivel: int) -> str:
     return f"""
 Nivel seleccionado: {nivel}/10
 
+INTERPRETACIÓN GENERAL:
+La dificultad controla qué tan completa, técnica y específica debe ser una respuesta para recibir el puntaje completo.
+No significa castigar sin razón. Si el estudiante se acerca al concepto, debe recibir puntaje parcial proporcional.
+
 ESCALA:
 1 = Modo amigo extremo.
 2 = Muy indulgente.
 3 = Flexible.
 4 = Moderadamente flexible.
-5 = Estándar justo.
+5 = Estándar académico normal.
 6 = Estándar exigente.
 7 = Estricto.
 8 = Muy estricto.
 9 = Experto.
 10 = Experto riguroso.
 
+CRITERIO HUMANO DE CALIFICACIÓN:
+- Respuesta totalmente correcta, técnica y completa: Correcta, 90% a 100%.
+- Respuesta correcta pero breve: Parcial alta o Correcta según dificultad, 70% a 90%.
+- Respuesta con idea central correcta pero incompleta: Parcial, 40% a 70%.
+- Respuesta vaga, confusa o con errores importantes: Parcial baja, 10% a 40%.
+- Respuesta totalmente incorrecta o en blanco: Incorrecta, 0%.
+
 REGLAS POR NIVEL:
-- Nivel 1-2: si la idea principal está, otorga casi todo el puntaje.
+- Nivel 1-2: si la idea principal aparece, otorga casi todo el puntaje.
 - Nivel 3-4: acepta respuestas breves si el concepto central es correcto.
-- Nivel 5: idea central correcta = Correcta o Parcial alta. No exijas tecnicismos exactos.
-- Nivel 6: exige concepto correcto y algo de precisión.
-- Nivel 7: exige precisión, permite parciales justos.
-- Nivel 8: penaliza omisiones importantes.
-- Nivel 9-10: exige definición técnica, precisión, completitud y explicación suficiente.
+- Nivel 5: acepta definiciones breves cuando la pregunta es de definición. Si la pregunta pide explicar, comparar, describir pasos o justificar, una respuesta muy breve debe ser Parcial.
+- Nivel 6: exige concepto correcto y precisión moderada.
+- Nivel 7: exige precisión y penaliza omisiones relevantes.
+- Nivel 8: exige desarrollo suficiente. Respuestas generales en preguntas explicativas deben ser Parciales.
+- Nivel 9: exige vocabulario técnico, completitud y explicación clara.
+- Nivel 10: exige precisión técnica, completitud, relación con el material y claridad. No regales puntos completos por respuestas incompletas.
 
-RANGOS PARA RESPUESTAS PARCIALES:
-- Nivel 1-2: parcial = 70-95%.
-- Nivel 3-4: parcial = 60-90%.
-- Nivel 5-6: parcial = 50-85%.
-- Nivel 7-8: parcial = 35-75%.
-- Nivel 9-10: parcial = 20-60%.
+TOPES OBLIGATORIOS POR DIFICULTAD:
+- Nivel 5:
+  * Definición corta correcta: puede recibir 1.0 si cubre la idea esencial.
+  * Pregunta explicativa muy breve: máximo 0.80.
+  * Pregunta de pasos con pasos incompletos: máximo 0.70.
+- Nivel 8:
+  * Respuesta correcta pero muy breve en pregunta explicativa: máximo 0.75.
+  * Pregunta que pide pasos y solo menciona 1 o 2 pasos generales: máximo 0.55.
+  * Pregunta que pide comparar y solo da una diferencia superficial: máximo 0.65.
+  * Definición correcta pero sin detalle técnico importante: máximo 0.85.
+- Nivel 9:
+  * Respuesta correcta pero breve en pregunta explicativa: máximo 0.65.
+  * Pregunta de pasos incompleta: máximo 0.45.
+  * Respuesta vaga con idea central: máximo 0.40.
+- Nivel 10:
+  * Respuesta completa, técnica y alineada al material: 0.90 a 1.00.
+  * Respuesta correcta pero breve: 0.60 a 0.80.
+  * Respuesta con idea central correcta pero incompleta: 0.30 a 0.60.
+  * Respuesta vaga, confusa o con error importante: 0.10 a 0.30.
+  * Respuesta sin relación o en blanco: 0.00.
+  * Para dar 1.00 en nivel 10, la respuesta debe cubrir los elementos principales del material, no solo una frase general.
 
-REGLAS ESPECIALES PARA NIVEL 9-10:
-- No otorgues 100% solo porque la idea general esté correcta.
-- Si la pregunta pide explicar, relacionar, justificar, mencionar y describir, o responder ampliamente, una respuesta muy breve debe ser Parcial alta, no Correcta completa.
-- Si la respuesta no incluye detalles técnicos importantes, ejemplos o explicación suficiente, baja puntos.
-- Para otorgar puntaje completo, la respuesta debe ser correcta, completa, específica, clara y técnicamente precisa.
-- Si solo menciona elementos pero no los describe, no debe obtener puntaje completo.
-- Si falta una parte de una pregunta compuesta, debe ser Parcial.
-- En nivel 10, sé riguroso pero justo.
+TIPOS DE PREGUNTA:
+- Definición: pide definir un concepto.
+- Explicativa: pide explicar, justificar, relacionar, describir, comparar, mencionar ventajas o dar pasos.
+- Compuesta: pide varios elementos en una sola pregunta.
+
+REGLAS PARA PREGUNTAS EXPLICATIVAS:
+- Si pide "explique", debe haber explicación, no solo una frase.
+- Si pide "diferencia entre A y B", debe mencionar características de ambos y la diferencia central.
+- Si pide "pasos", debe listar o explicar la secuencia principal.
+- Si pide "mencione y describa", no basta con mencionar; debe describir brevemente.
+- Si pide ventajas, deben ser ventajas específicas, no frases vagas como "es mejor" o "da mejores respuestas".
 
 IMPORTANTE:
 Si el RAG no recupera una definición clara, usa conocimiento académico general siempre que no contradiga el material.
 No califiques nivel {nivel} como si fuera otro nivel.
+No uses "Correcta" solo porque la respuesta tiene una parte verdadera; si falta desarrollo relevante, usa "Parcial".
 """
 
 
@@ -835,7 +866,7 @@ def calificar_paquete(paquete: dict, nivel_dificultad: int) -> str:
 
     prompt = f"""
 Eres un DOCENTE CALIFICADOR PROFESIONAL.
-Califica este examen con precisión y justicia académica.
+Califica este examen con precisión, justicia académica y criterio humano.
 
 Usa exactamente:
 1. El texto extraído del examen.
@@ -872,16 +903,19 @@ REGLAS OBLIGATORIAS:
 - No califiques sobre más de {rubrica["total"]}.
 - Diferencia pregunta global y pregunta local.
 - Al final convierte a escala de 100.
-- Si el nivel es 5, una respuesta con idea central correcta puede ser Correcta aunque falten tecnicismos.
-- Si el nivel es 9 o 10, no otorgues puntaje completo a respuestas demasiado breves cuando la pregunta pide explicar, justificar, relacionar, mencionar y describir, o responder ampliamente.
-- En nivel 9 o 10, una respuesta correcta pero breve debe ser Parcial alta, salvo que la pregunta sea solo una definición corta y la definición esté completa.
-- Si la pregunta pide varios elementos y falta uno, debe ser Parcial.
-- Si la pregunta pide “mencione y describa”, no basta con solo mencionar; debe haber descripción.
-- Si el RAG no trae definición clara, usa conocimiento académico general si no contradice el material, pero califica con cautela.
-- El estado “Correcta” solo debe usarse cuando la respuesta cubre la idea central y los elementos principales esperados.
-- En nivel 10, para dar el 100% del valor, la respuesta debe ser técnica, clara, completa y específica.
-- No regales puntos por respuestas vagas.
-- Si una respuesta es parcialmente correcta, asigna una puntuación proporcional al valor máximo de esa pregunta.
+- La puntuación debe ser proporcional a cuánto se acerca la respuesta del estudiante a la respuesta esperada.
+- No pongas 0 si el estudiante tiene parte de la idea correcta.
+- No pongas 1.0 si la respuesta está incompleta para el nivel de dificultad seleccionado.
+- Usa "Parcial" cuando la respuesta tenga una parte correcta pero le falte desarrollo, precisión, pasos, comparación o vocabulario técnico.
+- Usa "Correcta" solamente cuando cubra la idea central y los elementos importantes esperados para ese nivel.
+- Usa "Incorrecta" solamente cuando la respuesta sea falsa, no responda, esté en blanco o no tenga relación real con la pregunta.
+- En preguntas de definición de 1 punto, una respuesta breve puede ser completa si contiene la esencia exacta del concepto.
+- En preguntas explicativas de 1 punto, una respuesta muy breve no debe recibir 1.0 en niveles 5 o superiores.
+- En nivel 10, una respuesta de una sola frase en preguntas explicativas casi siempre debe ser Parcial, no Correcta.
+- Si el RAG trae una respuesta clara, úsala como base principal.
+- Si el RAG no trae definición clara, usa conocimiento académico general si no contradice el material.
+- Justifica cada puntuación con claridad.
+- No seas excesivamente amable. No seas injustamente duro. Sé proporcional.
 
 FORMATO FINAL OBLIGATORIO.
 Responde SOLO en Markdown:
