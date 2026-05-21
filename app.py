@@ -1,4 +1,3 @@
-
 import os
 import re
 import hashlib
@@ -1509,7 +1508,7 @@ if st.session_state.mostrar_resultado and st.session_state.ultimo_resultado:
         curso_manual
     )
 
-    down1, down2, down3 = st.columns(3)
+    down1, down2 = st.columns(2)
 
     with down1:
         st.download_button(
@@ -1527,19 +1526,6 @@ if st.session_state.mostrar_resultado and st.session_state.ultimo_resultado:
             file_name=nombre_word,
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             disabled=word_bytes is None
-        )
-
-    with down3:
-        st.download_button(
-            label="⬇️ Descargar Markdown",
-            data=resultado_limpio,
-            file_name=nombre_archivo_reporte(
-                "md",
-                st.session_state.ultimo_guardado_id,
-                estudiante_manual,
-                curso_manual
-            ),
-            mime="text/markdown"
         )
 
     st.info(

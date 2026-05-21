@@ -755,7 +755,7 @@ st.markdown(
         <div class="hero-title">Historial Inteligente</div>
         <div class="hero-sub">
             Consulta, filtra, abre y descarga los reportes guardados por EvaluaIA Neural.
-            Esta vista recupera las calificaciones desde PostgreSQL y permite exportar cada informe en PDF, Word o Markdown.
+            Esta vista recupera las calificaciones desde PostgreSQL y permite exportar cada informe en PDF o Word.
         </div>
         <div>
             <span class="badge">🗄️ PostgreSQL</span>
@@ -1031,7 +1031,7 @@ for item in filtrados:
                 pdf_bytes = generar_pdf_reporte(examen)
                 word_bytes = generar_word_reporte(examen)
 
-                d1, d2, d3 = st.columns(3)
+                d1, d2 = st.columns(2)
 
                 with d1:
                     st.download_button(
@@ -1051,14 +1051,6 @@ for item in filtrados:
                         key=f"word_{item_id}",
                     )
 
-                with d3:
-                    st.download_button(
-                        label="⬇️ Descargar Markdown",
-                        data=informe,
-                        file_name=nombre_archivo_reporte("md", examen),
-                        mime="text/markdown",
-                        key=f"md_{item_id}",
-                    )
 
                 st.info(f"Formato: {nombre_archivo_reporte('pdf', examen)}")
 
@@ -1075,7 +1067,7 @@ for item in filtrados:
 st.markdown(
     """
     <div class="footer-note">
-        Grupo 8 · EvaluaIA Neural · Historial de calificaciones con reportes PDF, Word y Markdown
+        Grupo 8 · EvaluaIA Neural · Historial de calificaciones con reportes PDF y Word
     </div>
     """,
     unsafe_allow_html=True,
