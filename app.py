@@ -1,3 +1,4 @@
+
 import os
 import re
 import hashlib
@@ -13,14 +14,7 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-from reportlab.platypus import (
-    SimpleDocTemplate,
-    Paragraph,
-    Spacer,
-    Table,
-    TableStyle,
-    PageBreak,
-)
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
@@ -150,8 +144,7 @@ hr {
     padding: 22px;
     min-height: 145px;
     border: 1px solid rgba(148,163,184,0.20);
-    background:
-        linear-gradient(180deg, rgba(15,23,42,0.88), rgba(2,6,23,0.72));
+    background: linear-gradient(180deg, rgba(15,23,42,0.88), rgba(2,6,23,0.72));
     box-shadow: 0 18px 48px rgba(0,0,0,0.30);
 }
 
@@ -188,8 +181,7 @@ hr {
     border-radius: 24px;
     padding: 22px;
     border: 1px dashed rgba(125,211,252,0.38);
-    background:
-        linear-gradient(180deg, rgba(15,23,42,0.72), rgba(30,41,59,0.38));
+    background: linear-gradient(180deg, rgba(15,23,42,0.72), rgba(30,41,59,0.38));
     margin-bottom: 14px;
 }
 
@@ -268,8 +260,7 @@ div[data-testid="stFileUploader"] section {
     border-radius: 30px;
     padding: 26px;
     border: 1px solid rgba(148,163,184,0.22);
-    background:
-        linear-gradient(180deg, rgba(15,23,42,0.88), rgba(2,6,23,0.72));
+    background: linear-gradient(180deg, rgba(15,23,42,0.88), rgba(2,6,23,0.72));
     box-shadow: 0 22px 72px rgba(0,0,0,0.38);
 }
 
@@ -318,15 +309,20 @@ defaults = {
     "ultima_dificultad": 5,
     "mostrar_resultado": False,
     "contextos_bytes": [],
-    "imagen_bytes": None,
+    "imagenes_bytes": [],
     "ultimo_resumen": {},
     "ultimo_guardado_id": None,
     "datos_reporte": {},
+    "metadatos_aplicados": False,
 }
 
 for key, value in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = value
+
+# Compatibilidad si venías usando imagen_bytes en una versión anterior
+if "imagen_bytes" in st.session_state and st.session_state.imagen_bytes and not st.session_state.imagenes_bytes:
+    st.session_state.imagenes_bytes = [st.session_state.imagen_bytes]
 
 
 # ============================================================
@@ -359,12 +355,12 @@ def nombre_archivo_reporte(extension: str, examen_id=None, estudiante=None, curs
     id_txt = f"ID{examen_id}" if examen_id else "SinID"
     estudiante_txt = limpiar_para_archivo(estudiante)
     curso_txt = limpiar_para_archivo(curso)
-
     return f"Reporte_{id_txt}_{estudiante_txt}_{curso_txt}_{fecha}.{extension}"
 
 
 def guardar_archivo_temporal(temp_dir, nombre, data):
-    ruta = os.path.join(temp_dir, nombre)
+    nombre_seguro = limpiar_para_archivo(os.path.splitext(nombre)[0]) + os.path.splitext(nombre)[1]
+    ruta = os.path.join(temp_dir, nombre_seguro)
     with open(ruta, "wb") as f:
         f.write(data)
     return ruta
@@ -496,10 +492,7 @@ def crear_gauge(nota):
         go.Indicator(
             mode="gauge+number",
             value=nota,
-            number={
-                "suffix": "/100",
-                "font": {"size": 36, "color": "#f8fafc"}
-            },
+            number={"suffix": "/100", "font": {"size": 36, "color": "#f8fafc"}},
             gauge={
                 "axis": {"range": [0, 100], "tickcolor": "#94a3b8"},
                 "bar": {"color": "#60a5fa"},
@@ -566,6 +559,53 @@ def estado_pregunta(bloque: str):
     if "Estado:** Incorrecta" in bloque or "Estado: Incorrecta" in bloque:
         return "❌"
     return "🧠"
+
+
+def safe_image(image_bytes: bytes, **kwargs):
+    try:
+        st.image(image_bytes, width="stretch", **kwargs)
+    except TypeError:
+        st.image(image_bytes, use_container_width=True, **kwargs)
+
+
+def aplicar_metadatos_detectados(paquete: dict):
+    """
+    Llena datos_reporte una sola vez con lo detectado por el OCR/ICR.
+    El docente siempre puede editar después.
+    """
+    metadatos = paquete.get("metadatos") or {}
+
+    if not metadatos:
+        return
+
+    actuales = st.session_state.datos_reporte or {}
+
+    nuevos = {
+        "examen_id": st.session_state.ultimo_guardado_id,
+        "estudiante": actuales.get("estudiante") or metadatos.get("estudiante", ""),
+        "codigo": actuales.get("codigo") or metadatos.get("codigo", ""),
+        "curso": actuales.get("curso") or metadatos.get("curso", ""),
+        "docente": actuales.get("docente") or metadatos.get("docente", ""),
+        "titulo": actuales.get("titulo") or metadatos.get("titulo", ""),
+        "serie": actuales.get("serie") or metadatos.get("serie", ""),
+        "fecha_examen": actuales.get("fecha_examen") or metadatos.get("fecha_examen", ""),
+    }
+
+    st.session_state.datos_reporte = nuevos
+    st.session_state.metadatos_aplicados = True
+
+
+def resumen_archivos_examen(imagenes: list) -> tuple[str, str]:
+    if not imagenes:
+        return None, None
+
+    nombres = [img.get("name", "imagen") for img in imagenes]
+    hashes = [hash_bytes(img.get("bytes", b"")) for img in imagenes]
+
+    archivo_nombre = " | ".join(nombres)
+    archivo_hash = hashlib.sha256("".join(hashes).encode()).hexdigest()
+
+    return archivo_nombre, archivo_hash
 
 
 # ============================================================
@@ -864,10 +904,10 @@ if hasattr(st, "dialog"):
 ### Pipeline de EvaluaIA Neural
 
 **1. OCR/ICR Vision**  
-Lee la imagen del examen, detecta preguntas, respuestas y rúbrica.
+Lee una o varias imágenes del examen, detecta encabezado, preguntas, respuestas y rúbrica.
 
 **2. RAG Contextual**  
-Busca fragmentos relevantes en los documentos del profesor.
+Busca fragmentos relevantes en uno o varios documentos del profesor.
 
 **3. LLM Calificador**  
 Compara la respuesta del estudiante contra el material de referencia.
@@ -875,10 +915,13 @@ Compara la respuesta del estudiante contra el material de referencia.
 **4. Dificultad Adaptativa**  
 Ajusta la exigencia de 1 a 10.
 
-**5. Reportes PDF / Word**  
+**5. Metadatos automáticos**  
+Intenta detectar estudiante, curso, docente, serie y fecha.
+
+**6. Reportes PDF / Word**  
 Genera documentos descargables con marca de agua del Grupo 8.
 
-**6. Historial PostgreSQL**  
+**7. Historial PostgreSQL**  
 Guarda resultados para consultarlos después.
 """
         )
@@ -890,11 +933,11 @@ Guarda resultados para consultarlos después.
 ### Cómo usar el sistema
 
 1. Sube uno o varios **materiales de referencia**.
-2. Sube la **imagen del examen resuelto**.
+2. Sube una o varias **imágenes del mismo examen**.
 3. Selecciona el nivel de dificultad.
 4. Presiona **Ejecutar análisis inteligente**.
 5. Revisa el dashboard.
-6. Completa datos del estudiante.
+6. Verifica o edita los datos detectados.
 7. Descarga el reporte en **PDF** o **Word**.
 8. Guarda la calificación en historial.
 """
@@ -911,12 +954,14 @@ st.markdown(
         <div class="hero-title">EvaluaIA Neural</div>
         <div class="hero-sub">
             Sistema inteligente multimodal para la calificación autónoma de exámenes.
-            Integra visión artificial, OCR/ICR, RAG, LLM, reportes académicos y almacenamiento histórico.
+            Integra visión artificial, OCR/ICR, RAG, LLM, reportes académicos,
+            detección automática de metadatos y almacenamiento histórico.
         </div>
         <div>
             <span class="badge">👁️ OCR/ICR Vision</span>
             <span class="badge">📚 RAG Contextual</span>
             <span class="badge">🧠 LLM Calificador</span>
+            <span class="badge">🖼️ Multi-imagen</span>
             <span class="badge">🎯 Dificultad 1–10</span>
             <span class="badge">📄 PDF / Word</span>
             <span class="badge">🗄️ Historial PostgreSQL</span>
@@ -956,7 +1001,7 @@ with b4:
         """
         <div class="glass">
             <span class="status-chip">Grupo 8</span>
-            <span class="small"> · Marca de agua activa en reportes PDF y Word.</span>
+            <span class="small"> · Reportes con marca de agua y metadatos detectados.</span>
         </div>
         """,
         unsafe_allow_html=True
@@ -975,7 +1020,12 @@ with c1:
     card("Materiales", str(len(st.session_state.contextos_bytes)), "Documentos usados como base de conocimiento.", "📚")
 
 with c2:
-    card("Examen", "Listo" if st.session_state.imagen_bytes else "Pendiente", "Imagen del examen del estudiante.", "📝")
+    card(
+        "Imágenes examen",
+        str(len(st.session_state.imagenes_bytes)) if st.session_state.imagenes_bytes else "Pendiente",
+        "Una o varias hojas del mismo examen.",
+        "📝"
+    )
 
 with c3:
     card("Motor IA", "OCR + RAG + LLM", "Procesamiento visual y evaluación contextual.", "⚡")
@@ -989,7 +1039,10 @@ with c4:
 # ============================================================
 
 st.markdown('<div class="section-title">📥 Carga de archivos</div>', unsafe_allow_html=True)
-st.markdown('<div class="section-sub">Sube el material del profesor y la imagen del examen.</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="section-sub">Sube los materiales del profesor y una o varias imágenes del mismo examen.</div>',
+    unsafe_allow_html=True
+)
 
 col1, col2 = st.columns(2)
 
@@ -998,7 +1051,7 @@ with col1:
         """
         <div class="upload-box">
             <h3>📚 Materiales de referencia</h3>
-            <p style="color:#94a3b8;">PDF, DOCX, TXT o MD. Estos documentos alimentan el RAG.</p>
+            <p style="color:#94a3b8;">PDF, DOCX, TXT o MD. Puedes subir varios documentos.</p>
         </div>
         """,
         unsafe_allow_html=True
@@ -1017,31 +1070,34 @@ with col2:
         """
         <div class="upload-box">
             <h3>📝 Examen del estudiante</h3>
-            <p style="color:#94a3b8;">Imagen clara en PNG, JPG o JPEG.</p>
+            <p style="color:#94a3b8;">PNG, JPG o JPEG. Puedes subir varias hojas/imágenes del mismo examen.</p>
         </div>
         """,
         unsafe_allow_html=True
     )
 
-    imagen_examen = st.file_uploader(
+    imagenes_examen = st.file_uploader(
         "Examen",
         type=["png", "jpg", "jpeg"],
-        key="uploader_imagen",
+        accept_multiple_files=True,
+        key="uploader_imagenes",
         label_visibility="collapsed"
     )
 
 
 if archivos_contexto:
-    st.session_state.contextos_bytes = [
+    nuevos_contextos = [
         {"name": archivo.name, "bytes": archivo.getvalue()}
         for archivo in archivos_contexto
     ]
+    st.session_state.contextos_bytes = nuevos_contextos
 
-if imagen_examen:
-    st.session_state.imagen_bytes = {
-        "name": imagen_examen.name,
-        "bytes": imagen_examen.getvalue()
-    }
+if imagenes_examen:
+    nuevas_imagenes = [
+        {"name": imagen.name, "bytes": imagen.getvalue()}
+        for imagen in imagenes_examen
+    ]
+    st.session_state.imagenes_bytes = nuevas_imagenes
 
 
 # ============================================================
@@ -1061,10 +1117,15 @@ with p1:
 
 with p2:
     st.markdown("### 🖼️ Vista previa del examen")
-    if st.session_state.imagen_bytes:
-        st.image(st.session_state.imagen_bytes["bytes"], width="stretch")
+    if st.session_state.imagenes_bytes:
+        st.success(f"{len(st.session_state.imagenes_bytes)} imagen(es) cargada(s).")
+        tabs = st.tabs([f"Hoja {i}" for i in range(1, len(st.session_state.imagenes_bytes) + 1)])
+        for tab, imagen in zip(tabs, st.session_state.imagenes_bytes):
+            with tab:
+                st.caption(imagen["name"])
+                safe_image(imagen["bytes"])
     else:
-        st.info("Aún no has subido la imagen del examen.")
+        st.info("Aún no has subido imágenes del examen.")
 
 
 # ============================================================
@@ -1097,7 +1158,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-mostrar_extraccion = st.checkbox("🔎 Mostrar extracción OCR después del análisis", value=False)
+mostrar_extraccion = st.checkbox("🔎 Mostrar extracción OCR/ICR después del análisis", value=False)
 
 
 # ============================================================
@@ -1121,10 +1182,13 @@ if limpiar:
     st.session_state.ultimo_resultado = None
     st.session_state.mostrar_resultado = False
     st.session_state.contextos_bytes = []
-    st.session_state.imagen_bytes = None
+    st.session_state.imagenes_bytes = []
     st.session_state.ultimo_resumen = {}
     st.session_state.ultimo_guardado_id = None
     st.session_state.datos_reporte = {}
+    st.session_state.metadatos_aplicados = False
+    if "imagen_bytes" in st.session_state:
+        st.session_state.imagen_bytes = None
     st.rerun()
 
 
@@ -1134,20 +1198,27 @@ if limpiar:
 
 if iniciar:
     if not st.session_state.contextos_bytes:
-        st.warning("Debes subir al menos un archivo de referencia.")
+        st.error("📚 Falta el material de referencia. Sube al menos un PDF, Word, TXT o MD.")
         st.stop()
 
-    if st.session_state.imagen_bytes is None:
-        st.warning("Debes subir la imagen del examen.")
+    if not st.session_state.imagenes_bytes:
+        st.error("📝 Falta el examen. Sube al menos una imagen del examen.")
         st.stop()
+
+    if len(st.session_state.imagenes_bytes) > 8:
+        st.warning("⚠️ Subiste más de 8 imágenes. Puede funcionar, pero tardará más y consumirá más tokens.")
 
     try:
-        hash_actual = hash_bytes(st.session_state.imagen_bytes["bytes"])
+        hash_partes = []
+
+        for imagen in st.session_state.imagenes_bytes:
+            hash_partes.append(hash_bytes(imagen["bytes"]))
 
         for archivo in st.session_state.contextos_bytes:
-            hash_actual += hash_bytes(archivo["bytes"])
+            hash_partes.append(hash_bytes(archivo["bytes"]))
 
-        hash_actual = hashlib.sha256(hash_actual.encode()).hexdigest()
+        hash_partes.append(str(nivel_dificultad))
+        hash_actual = hashlib.sha256("".join(hash_partes).encode()).hexdigest()
 
         reutilizar_cache = (
             st.session_state.paquete_cache is not None
@@ -1164,14 +1235,16 @@ if iniciar:
             )
             progress.progress(10)
 
-            ruta_imagen = guardar_archivo_temporal(
-                temp_dir,
-                st.session_state.imagen_bytes["name"],
-                st.session_state.imagen_bytes["bytes"]
-            )
+            rutas_imagenes = []
+            for i, imagen in enumerate(st.session_state.imagenes_bytes, start=1):
+                ruta = guardar_archivo_temporal(
+                    temp_dir,
+                    f"hoja_{i}_{imagen['name']}",
+                    imagen["bytes"]
+                )
+                rutas_imagenes.append(ruta)
 
             rutas_contexto = []
-
             for archivo in st.session_state.contextos_bytes:
                 ruta = guardar_archivo_temporal(
                     temp_dir,
@@ -1182,7 +1255,7 @@ if iniciar:
 
             if reutilizar_cache:
                 estado.markdown(
-                    '<div class="loading-card">♻️ Reutilizando OCR y RAG procesados...</div>',
+                    '<div class="loading-card">♻️ Reutilizando OCR/ICR y RAG procesados...</div>',
                     unsafe_allow_html=True
                 )
                 progress.progress(55)
@@ -1190,18 +1263,22 @@ if iniciar:
 
             else:
                 estado.markdown(
-                    '<div class="loading-card">👁️ Leyendo imagen con OCR/ICR y detectando rúbrica...</div>',
+                    '<div class="loading-card">👁️ Leyendo imágenes con OCR/ICR y detectando encabezado, rúbrica y respuestas...</div>',
                     unsafe_allow_html=True
                 )
                 progress.progress(25)
 
                 with st.spinner("Procesando visión y contexto..."):
                     paquete = preparar_paquete_evaluacion(
-                        ruta_imagen,
+                        rutas_imagenes,
                         rutas_contexto
                     )
 
                 progress.progress(68)
+
+                if not isinstance(paquete, dict):
+                    st.error("El motor principal no devolvió un paquete válido.")
+                    st.stop()
 
                 if "error" in paquete:
                     st.error(paquete["error"])
@@ -1210,9 +1287,17 @@ if iniciar:
                 st.session_state.paquete_cache = paquete
                 st.session_state.ultimo_hash = hash_actual
 
+            aplicar_metadatos_detectados(paquete)
+
             if mostrar_extraccion:
-                with st.expander("📄 Texto extraído del examen"):
+                with st.expander("📄 Texto extraído del examen", expanded=True):
                     st.text(paquete.get("texto_examen", ""))
+
+                with st.expander("🧾 Metadatos detectados", expanded=True):
+                    st.json(paquete.get("metadatos", {}))
+
+                with st.expander("🎯 Rúbrica detectada", expanded=False):
+                    st.json(paquete.get("rubrica", {}))
 
             estado.markdown(
                 '<div class="loading-card">📚 Comparando respuestas contra el material de referencia...</div>',
@@ -1234,14 +1319,15 @@ if iniciar:
 
             resultado = limpiar_markdown(resultado)
 
-            if not resultado:
-                st.error("La IA terminó, pero no devolvió un reporte válido.")
+            if not resultado or resultado.startswith("ERROR:"):
+                st.error(resultado or "La IA terminó, pero no devolvió un reporte válido.")
                 st.stop()
 
             st.session_state.ultimo_resultado = resultado
             st.session_state.ultimo_resumen = extraer_resumen(resultado)
             st.session_state.mostrar_resultado = True
             st.session_state.ultimo_guardado_id = None
+            st.session_state.datos_reporte["examen_id"] = None
 
             progress.progress(100)
             estado.markdown(
@@ -1252,7 +1338,8 @@ if iniciar:
             st.rerun()
 
     except Exception as e:
-        st.error(f"Error general:\n\n{str(e)}")
+        st.error("❌ Error general durante el análisis.")
+        st.exception(e)
 
 
 # ============================================================
@@ -1307,7 +1394,7 @@ if st.session_state.mostrar_resultado and st.session_state.ultimo_resultado:
         <div class="result-shell">
             <h2>📑 Informe de Calificación</h2>
             <p style="color:#94a3b8;">
-                Nivel aplicado: {nivel}/10 · Motor: OCR/ICR + RAG + LLM · Marca: Grupo 8
+                Nivel aplicado: {nivel}/10 · Motor: OCR/ICR + RAG + LLM · Imágenes: {len(st.session_state.imagenes_bytes)} · Marca: Grupo 8
             </p>
         </div>
         """,
@@ -1345,27 +1432,38 @@ if st.session_state.mostrar_resultado and st.session_state.ultimo_resultado:
     st.divider()
     st.markdown('<div class="section-title">🧾 Datos para reporte e historial</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="section-sub">Estos datos se usarán para el nombre del PDF/Word y para guardar el historial.</div>',
+        '<div class="section-sub">La IA intenta llenar estos datos automáticamente. El docente puede verificarlos o corregirlos antes de guardar.</div>',
         unsafe_allow_html=True
     )
+
+    paquete_actual = st.session_state.paquete_cache or {}
+    metadatos_detectados = paquete_actual.get("metadatos") or {}
+
+    if metadatos_detectados:
+        with st.expander("🤖 Datos detectados automáticamente por OCR/ICR", expanded=False):
+            st.json(metadatos_detectados)
+    else:
+        st.info("No se detectaron metadatos claros. El docente puede llenar los campos manualmente.")
+
+    datos_base = st.session_state.datos_reporte or {}
 
     d1, d2, d3 = st.columns(3)
 
     with d1:
-        estudiante_manual = st.text_input("Nombre del estudiante", value=st.session_state.datos_reporte.get("estudiante", ""))
-        codigo_manual = st.text_input("Código / carné", value=st.session_state.datos_reporte.get("codigo", ""))
+        estudiante_manual = st.text_input("Nombre del estudiante", value=datos_base.get("estudiante", ""))
+        codigo_manual = st.text_input("Código / carné", value=datos_base.get("codigo", ""))
 
     with d2:
-        curso_manual = st.text_input("Curso", value=st.session_state.datos_reporte.get("curso", ""))
-        docente_manual = st.text_input("Docente", value=st.session_state.datos_reporte.get("docente", ""))
+        curso_manual = st.text_input("Curso", value=datos_base.get("curso", ""))
+        docente_manual = st.text_input("Docente", value=datos_base.get("docente", ""))
 
     with d3:
-        titulo_manual = st.text_input("Título del examen", value=st.session_state.datos_reporte.get("titulo", ""))
-        serie_manual = st.text_input("Serie del examen", value=st.session_state.datos_reporte.get("serie", ""))
+        titulo_manual = st.text_input("Título del examen", value=datos_base.get("titulo", ""))
+        serie_manual = st.text_input("Serie del examen", value=datos_base.get("serie", ""))
 
     fecha_examen_manual = st.text_input(
         "Fecha del examen",
-        value=st.session_state.datos_reporte.get("fecha_examen", ""),
+        value=datos_base.get("fecha_examen", ""),
         placeholder="Opcional"
     )
 
@@ -1388,8 +1486,14 @@ if st.session_state.mostrar_resultado and st.session_state.ultimo_resultado:
 
     st.markdown("### 📥 Descargar reporte")
 
-    pdf_bytes = generar_pdf_reporte(datos_descarga, resumen, resultado_limpio)
-    word_bytes = generar_word_reporte(datos_descarga, resumen, resultado_limpio)
+    try:
+        pdf_bytes = generar_pdf_reporte(datos_descarga, resumen, resultado_limpio)
+        word_bytes = generar_word_reporte(datos_descarga, resumen, resultado_limpio)
+    except Exception as e:
+        st.error("No se pudieron generar los archivos de descarga.")
+        st.exception(e)
+        pdf_bytes = None
+        word_bytes = None
 
     nombre_pdf = nombre_archivo_reporte(
         "pdf",
@@ -1410,17 +1514,19 @@ if st.session_state.mostrar_resultado and st.session_state.ultimo_resultado:
     with down1:
         st.download_button(
             label="📄 Descargar PDF",
-            data=pdf_bytes,
+            data=pdf_bytes or b"",
             file_name=nombre_pdf,
-            mime="application/pdf"
+            mime="application/pdf",
+            disabled=pdf_bytes is None
         )
 
     with down2:
         st.download_button(
             label="📝 Descargar Word",
-            data=word_bytes,
+            data=word_bytes or b"",
             file_name=nombre_word,
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            disabled=word_bytes is None
         )
 
     with down3:
@@ -1457,12 +1563,7 @@ if st.session_state.mostrar_resultado and st.session_state.ultimo_resultado:
         try:
             paquete = st.session_state.paquete_cache or {}
 
-            imagen_nombre = None
-            imagen_hash = None
-
-            if st.session_state.imagen_bytes:
-                imagen_nombre = st.session_state.imagen_bytes.get("name")
-                imagen_hash = hash_bytes(st.session_state.imagen_bytes.get("bytes", b""))
+            imagen_nombre, imagen_hash = resumen_archivos_examen(st.session_state.imagenes_bytes)
 
             conclusion_general = extraer_texto_seccion("Conclusión General", resultado_limpio)
             recomendaciones = extraer_texto_seccion("Recomendaciones de Estudio", resultado_limpio)
@@ -1477,7 +1578,7 @@ if st.session_state.mostrar_resultado and st.session_state.ultimo_resultado:
                 fecha_examen=fecha_examen_manual or None,
 
                 archivo_nombre=imagen_nombre,
-                archivo_tipo="imagen",
+                archivo_tipo="imagenes" if len(st.session_state.imagenes_bytes) > 1 else "imagen",
                 archivo_hash=imagen_hash,
 
                 nivel_dificultad=nivel,
@@ -1498,7 +1599,7 @@ if st.session_state.mostrar_resultado and st.session_state.ultimo_resultado:
                 recomendaciones_estudio=recomendaciones,
 
                 texto_examen_extraido=paquete.get("texto_examen"),
-                metadatos_extraidos_json=None,
+                metadatos_extraidos_json=paquete.get("metadatos"),
                 rubrica_detectada_json=paquete.get("rubrica"),
                 informe_markdown=resultado_limpio
             )
@@ -1510,7 +1611,8 @@ if st.session_state.mostrar_resultado and st.session_state.ultimo_resultado:
             st.info("Ahora los próximos reportes descargados llevarán ese ID en el nombre del archivo.")
 
         except Exception as e:
-            st.error(f"❌ No se pudo guardar en historial: {e}")
+            st.error("❌ No se pudo guardar en historial.")
+            st.exception(e)
 
     if st.session_state.ultimo_guardado_id:
         nav1, nav2 = st.columns(2)
@@ -1529,9 +1631,9 @@ else:
         <div class="result-shell">
             <h2>🧠 Esperando examen</h2>
             <p style="color:#94a3b8;">
-                Sube el material de referencia y la imagen del examen para iniciar la evaluación inteligente.
+                Sube el material de referencia y una o varias imágenes del examen para iniciar la evaluación inteligente.
             </p>
-            <span class="badge">1. Lectura OCR/ICR</span>
+            <span class="badge">1. Lectura OCR/ICR multi-imagen</span>
             <span class="badge">2. Búsqueda RAG</span>
             <span class="badge">3. Evaluación LLM</span>
             <span class="badge">4. Reporte PDF/Word</span>

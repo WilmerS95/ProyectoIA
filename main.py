@@ -5,7 +5,7 @@ import hashlib
 import time
 from pathlib import Path
 from dataclasses import dataclass, asdict
-from typing import Optional
+from typing import Optional, Union, List, Dict, Any
 
 import chromadb
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
@@ -29,8 +29,8 @@ if not GEMINI_API_KEY:
 os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
 os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
 
-MODELO_PRINCIPAL = "gemini-2.5-flash"
-MODELO_FALLBACK = "gemini-2.5-flash-lite"
+MODELO_PRINCIPAL = os.getenv("MODELO_PRINCIPAL", "gemini-2.5-flash")
+MODELO_FALLBACK = os.getenv("MODELO_FALLBACK", "gemini-2.5-flash-lite")
 
 
 # ============================================================
@@ -58,36 +58,57 @@ class PreguntaExamen:
 
 
 # ============================================================
-# UTILIDADES CACHE
+# UTILIDADES GENERALES
 # ============================================================
 
-def hash_archivo(ruta):
+def normalizar_rutas(rutas: Union[str, Path, List[Union[str, Path]]]) -> List[str]:
+    """
+    Permite que app.py mande una sola imagen o varias imágenes.
+    Si recibe string/path, lo convierte a lista.
+    Si recibe lista, limpia valores vacíos.
+    """
+    if rutas is None:
+        return []
+
+    if isinstance(rutas, (str, Path)):
+        return [str(rutas)]
+
+    return [str(r) for r in rutas if r]
+
+
+def hash_archivo(ruta: Union[str, Path]) -> str:
     h = hashlib.sha256()
     with open(ruta, "rb") as f:
-        h.update(f.read())
+        for bloque in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(bloque)
     return h.hexdigest()
 
 
-def hash_archivos(rutas):
+def hash_archivos(rutas: List[Union[str, Path]]) -> str:
     h = hashlib.sha256()
     for ruta in rutas:
+        ruta = str(ruta)
+        h.update(Path(ruta).name.encode("utf-8", errors="ignore"))
         with open(ruta, "rb") as f:
-            h.update(f.read())
+            for bloque in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(bloque)
     return h.hexdigest()
 
 
-def cargar_json_cache(nombre):
+def cargar_json_cache(nombre: str):
     ruta = CACHE_DIR / nombre
     if not ruta.exists():
         return None
+
     try:
         with open(ruta, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except Exception as e:
+        print(f"No se pudo leer cache {nombre}: {e}")
         return None
 
 
-def guardar_json_cache(nombre, data):
+def guardar_json_cache(nombre: str, data: dict):
     ruta = CACHE_DIR / nombre
     try:
         with open(ruta, "w", encoding="utf-8") as f:
@@ -96,15 +117,43 @@ def guardar_json_cache(nombre, data):
         print(f"No se pudo guardar cache {nombre}: {e}")
 
 
+def limpiar_texto(texto: Any) -> str:
+    if texto is None:
+        return ""
+    return str(texto).strip()
+
+
+def normalizar_numero(valor):
+    if valor is None:
+        return None
+
+    try:
+        return float(str(valor).strip().replace(",", "."))
+    except Exception:
+        return None
+
+
+def buscar_numero_patron(texto: str, patrones: list):
+    for patron in patrones:
+        match = re.search(patron, texto, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            numero = normalizar_numero(match.group(1))
+            if numero is not None:
+                return numero
+    return None
+
+
 # ============================================================
-# GEMINI DIRECTO
+# GEMINI DIRECTO CON REINTENTOS
 # ============================================================
 
 def llamar_gemini(prompt: str, imagen_bytes: bytes = None, mime_type: str = None) -> str:
     cliente = genai.Client(api_key=GEMINI_API_KEY)
 
-    for modelo in [MODELO_PRINCIPAL, MODELO_FALLBACK]:
-        for intento in range(2):
+    modelos = [MODELO_PRINCIPAL, MODELO_FALLBACK]
+
+    for modelo in modelos:
+        for intento in range(3):
             try:
                 if imagen_bytes and mime_type:
                     contents = [
@@ -122,13 +171,13 @@ def llamar_gemini(prompt: str, imagen_bytes: bytes = None, mime_type: str = None
                     contents=contents,
                 )
 
-                texto = respuesta.text.strip() if respuesta.text else ""
+                texto = respuesta.text.strip() if respuesta and respuesta.text else ""
                 if texto:
                     return texto
 
             except Exception as e:
-                print(f"[Gemini] {modelo} intento {intento + 1}/2 falló: {e}")
-                time.sleep(1)
+                print(f"[Gemini] {modelo} intento {intento + 1}/3 falló: {e}")
+                time.sleep(1.5)
 
     return ""
 
@@ -142,6 +191,14 @@ Eres un sistema experto en OCR e ICR para exámenes académicos.
 
 Debes leer TODA la imagen:
 - encabezado
+- nombre del estudiante
+- código, carné o clave del estudiante
+- curso
+- docente
+- grado, sección o carrera si aparece
+- fecha del examen
+- título o tipo de examen
+- serie del examen
 - instrucciones
 - tabla de puntuación
 - series
@@ -153,14 +210,31 @@ Debes leer TODA la imagen:
 REGLAS IMPORTANTES:
 1. No inventes preguntas.
 2. No inventes respuestas.
-3. Si hay tabla de puntuación, úsala como fuente principal.
-4. Si arriba dice algo como 15/100 pero la tabla indica Serie 1, Serie 2 y Total, usa la tabla.
-5. Conserva el orden real del examen.
-6. Si algo no se entiende, escribe "No legible".
-7. Extrae preguntas y respuestas de forma clara.
-8. Si una pregunta dice "(1 punto)", "(2 puntos)", etc., extrae ese valor.
-9. No confundas escala de calificación con valor real del examen.
-10. No ignores textos pequeños donde diga "Valor 10 puntos", "Valor 5 puntos", "1 punto", etc.
+3. No inventes datos del estudiante.
+4. Si un dato no aparece o no se entiende, escribe "No detectado".
+5. Si hay tabla de puntuación, úsala como fuente principal.
+6. Si arriba dice algo como 15/100 pero la tabla indica Serie 1, Serie 2 y Total, usa la tabla.
+7. Conserva el orden real del examen.
+8. Si algo no se entiende, escribe "No legible".
+9. Extrae preguntas y respuestas de forma clara.
+10. Si una pregunta dice "(1 punto)", "(2 puntos)", etc., extrae ese valor.
+11. No confundas escala de calificación con valor real del examen.
+12. No ignores textos pequeños donde diga "Valor 10 puntos", "Valor 5 puntos", "1 punto", etc.
+13. Si esta imagen es una página intermedia de un examen de varias páginas, extrae solo lo que aparezca en esta imagen.
+14. Mantén el texto fiel a la imagen.
+
+OBLIGATORIO PARA METADATOS:
+Devuelve esta sección incluso si no detectas datos:
+
+METADATOS_DETECTADOS:
+Estudiante: ... / No detectado
+Código o carné: ... / No detectado
+Curso: ... / No detectado
+Docente: ... / No detectado
+Título del examen: ... / No detectado
+Serie del examen: ... / No detectado
+Fecha del examen: ... / No detectado
+Grado o sección: ... / No detectado
 
 OBLIGATORIO PARA PUNTEO:
 - Si ves "PRIMERA SERIE: Valor 10 puntos", escribe exactamente:
@@ -174,6 +248,16 @@ Puntos indicados en la pregunta: 1
 - Nunca ignores los valores aunque estén pequeños o al lado del título.
 
 Devuelve exactamente este formato:
+
+METADATOS_DETECTADOS:
+Estudiante: ... / No detectado
+Código o carné: ... / No detectado
+Curso: ... / No detectado
+Docente: ... / No detectado
+Título del examen: ... / No detectado
+Serie del examen: ... / No detectado
+Fecha del examen: ... / No detectado
+Grado o sección: ... / No detectado
 
 RUBRICA_DETECTADA:
 Serie 1: ... / No especificado
@@ -200,20 +284,38 @@ NO HAY EXAMEN LEGIBLE.
 """
 
 
+def obtener_mime_imagen(ruta_imagen: str) -> str:
+    extension = Path(ruta_imagen).suffix.lower()
+
+    if extension == ".png":
+        return "image/png"
+
+    if extension in [".jpg", ".jpeg"]:
+        return "image/jpeg"
+
+    if extension == ".webp":
+        return "image/webp"
+
+    return "image/jpeg"
+
+
 def extraer_texto_imagen_gemini(ruta_imagen: str) -> str:
     imagen_hash = hash_archivo(ruta_imagen)
     cache_name = f"ocr_{imagen_hash}.json"
 
     cache = cargar_json_cache(cache_name)
     if cache and cache.get("texto"):
-        print("✅ OCR desde cache.")
+        print(f"✅ OCR desde cache: {Path(ruta_imagen).name}")
         return cache["texto"]
 
-    extension = Path(ruta_imagen).suffix.lower()
-    mime_type = "image/png" if extension == ".png" else "image/jpeg"
+    mime_type = obtener_mime_imagen(ruta_imagen)
 
-    with open(ruta_imagen, "rb") as f:
-        imagen_bytes = f.read()
+    try:
+        with open(ruta_imagen, "rb") as f:
+            imagen_bytes = f.read()
+    except Exception as e:
+        print(f"No se pudo abrir imagen {ruta_imagen}: {e}")
+        return ""
 
     texto = llamar_gemini(
         OCR_PROMPT,
@@ -231,8 +333,106 @@ def extraer_texto_imagen(ruta_imagen: str) -> str:
     return extraer_texto_imagen_gemini(ruta_imagen)
 
 
+def extraer_texto_varias_imagenes(rutas_imagenes: List[str]) -> str:
+    """
+    Une varias imágenes del mismo examen como si fueran varias páginas.
+    """
+    secciones = []
+
+    for i, ruta in enumerate(rutas_imagenes, start=1):
+        texto_pagina = extraer_texto_imagen_gemini(ruta)
+
+        if not texto_pagina.strip():
+            return f"ERROR_IMAGEN_{i}: No se pudo extraer texto de la imagen {Path(ruta).name}."
+
+        if "NO HAY EXAMEN LEGIBLE" in texto_pagina.upper():
+            return f"ERROR_IMAGEN_{i}: La imagen {Path(ruta).name} no contiene un examen legible."
+
+        secciones.append(f"""
+========================
+PÁGINA / IMAGEN {i}
+ARCHIVO: {Path(ruta).name}
+========================
+{texto_pagina}
+""")
+
+    return "\n\n".join(secciones).strip()
+
+
 # ============================================================
-# LECTURA DE DOCUMENTOS
+# METADATOS DEL EXAMEN
+# ============================================================
+
+def limpiar_valor_metadato(valor: str) -> str:
+    valor = limpiar_texto(valor)
+    valor = re.sub(r"\s+", " ", valor).strip()
+    valor = valor.strip("-:;,. ")
+
+    if not valor:
+        return ""
+
+    bajos = valor.lower()
+    invalidos = [
+        "no detectado",
+        "no especificado",
+        "no legible",
+        "no aparece",
+        "n/a",
+        "na",
+        "none",
+        "null",
+    ]
+
+    if bajos in invalidos:
+        return ""
+
+    return valor
+
+
+def extraer_linea_metadato(texto: str, etiquetas: List[str]) -> str:
+    for etiqueta in etiquetas:
+        patron = rf"{re.escape(etiqueta)}\s*:\s*(.+)"
+        match = re.search(patron, texto, flags=re.IGNORECASE)
+        if match:
+            linea = match.group(1).splitlines()[0]
+            return limpiar_valor_metadato(linea)
+    return ""
+
+
+def extraer_metadatos_examen(texto_examen: str) -> Dict[str, str]:
+    """
+    Extrae datos para rellenar automáticamente los campos del reporte.
+    El docente puede verificarlos o editarlos desde app.py.
+    """
+    texto = texto_examen or ""
+
+    metadatos = {
+        "estudiante": extraer_linea_metadato(texto, ["Estudiante", "Nombre del estudiante", "Nombre"]),
+        "codigo": extraer_linea_metadato(texto, ["Código o carné", "Codigo o carne", "Código", "Codigo", "Carné", "Carne", "Clave"]),
+        "curso": extraer_linea_metadato(texto, ["Curso", "Materia", "Asignatura"]),
+        "docente": extraer_linea_metadato(texto, ["Docente", "Profesor", "Catedrático", "Catedratico", "Maestro"]),
+        "titulo": extraer_linea_metadato(texto, ["Título del examen", "Titulo del examen", "Título", "Titulo", "Examen"]),
+        "serie": extraer_linea_metadato(texto, ["Serie del examen", "Serie", "Versión", "Version"]),
+        "fecha_examen": extraer_linea_metadato(texto, ["Fecha del examen", "Fecha"]),
+        "grado_seccion": extraer_linea_metadato(texto, ["Grado o sección", "Grado o seccion", "Grado", "Sección", "Seccion"]),
+    }
+
+    # Fallbacks por patrones frecuentes de encabezado.
+    if not metadatos["estudiante"]:
+        match = re.search(r"(?:Alumno|Alumna|Estudiante|Nombre)\s*[:\-]\s*([^\n\r]+)", texto, flags=re.IGNORECASE)
+        if match:
+            metadatos["estudiante"] = limpiar_valor_metadato(match.group(1))
+
+    if not metadatos["fecha_examen"]:
+        match = re.search(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b", texto)
+        if match:
+            metadatos["fecha_examen"] = match.group(1)
+
+    return metadatos
+
+
+# ============================================================
+# LECTURA DE DOCUMENTOS DE REFERENCIA
 # ============================================================
 
 def leer_archivo_contexto(ruta: str) -> str:
@@ -257,8 +457,21 @@ def leer_archivo_contexto(ruta: str) -> str:
         if extension == ".docx":
             from docx import Document
             doc = Document(ruta)
-            return "\n".join([p.text for p in doc.paragraphs]).strip()
+            partes = []
 
+            for p in doc.paragraphs:
+                if p.text.strip():
+                    partes.append(p.text.strip())
+
+            for tabla in doc.tables:
+                for fila in tabla.rows:
+                    celdas = [c.text.strip() for c in fila.cells if c.text.strip()]
+                    if celdas:
+                        partes.append(" | ".join(celdas))
+
+            return "\n".join(partes).strip()
+
+        print(f"Formato de contexto no soportado: {extension}")
         return ""
 
     except Exception as e:
@@ -267,6 +480,11 @@ def leer_archivo_contexto(ruta: str) -> str:
 
 
 def leer_contextos(rutas_contexto: list) -> str:
+    rutas_contexto = normalizar_rutas(rutas_contexto)
+
+    if not rutas_contexto:
+        return ""
+
     contexto_hash = hash_archivos(rutas_contexto)
     cache_name = f"contexto_{contexto_hash}.json"
 
@@ -290,6 +508,8 @@ ARCHIVO: {Path(ruta).name}
 {texto}
 """
             )
+        else:
+            print(f"Documento sin texto útil: {Path(ruta).name}")
 
     texto_final = "\n".join(textos).strip()
 
@@ -303,28 +523,8 @@ ARCHIVO: {Path(ruta).name}
 # RÚBRICA Y PUNTEO
 # ============================================================
 
-def normalizar_numero(valor):
-    if valor is None:
-        return None
-
-    try:
-        return float(str(valor).strip().replace(",", "."))
-    except Exception:
-        return None
-
-
-def buscar_numero_patron(texto, patrones):
-    for patron in patrones:
-        match = re.search(patron, texto, flags=re.IGNORECASE)
-        if match:
-            numero = normalizar_numero(match.group(1))
-            if numero is not None:
-                return numero
-
-    return None
-
-
 def contar_preguntas_ocr(texto_examen: str) -> int:
+    # Cuenta bloques tipo Pregunta 1:, Pregunta 2:, etc.
     return len(re.findall(r"Pregunta\s+\d+\s*:", texto_examen, flags=re.IGNORECASE))
 
 
@@ -357,7 +557,7 @@ def detectar_rubrica(texto_examen: str) -> dict:
         serie2 = serie2 if serie2 is not None else 0
         total_series = serie1 + serie2
 
-        if total is None or abs(total - total_series) <= 1:
+        if total is None or abs(total - total_series) <= max(1, total_series * 0.10):
             total = total_series
 
         return {
@@ -405,6 +605,12 @@ def detectar_serie(linea: str):
 
     if "segunda serie" in l or "serie: segunda" in l or "serie 2" in l:
         return "Serie 2"
+
+    if "tercera serie" in l or "serie: tercera" in l or "serie 3" in l:
+        return "Serie 3"
+
+    if "cuarta serie" in l or "serie: cuarta" in l or "serie 4" in l:
+        return "Serie 4"
 
     return None
 
@@ -496,11 +702,11 @@ def asignar_puntajes(preguntas_raw: list, rubrica: dict) -> list:
     total = float(rubrica["total"])
     cantidad = max(len(preguntas_raw), 1)
 
-    serie1_count = sum(1 for p in preguntas_raw if p["serie"] == "Serie 1")
-    serie2_count = sum(1 for p in preguntas_raw if p["serie"] == "Serie 2")
+    series = {}
+    for p in preguntas_raw:
+        series[p["serie"]] = series.get(p["serie"], 0) + 1
 
     valores_detectados = []
-
     for p in preguntas_raw:
         valor_individual = extraer_valor_pregunta(p["bloque"])
         valores_detectados.append(valor_individual)
@@ -521,11 +727,11 @@ def asignar_puntajes(preguntas_raw: list, rubrica: dict) -> list:
         if usar_valores_individuales and valor_individual is not None:
             valor = valor_individual
 
-        elif rubrica["serie1"] is not None or rubrica["serie2"] is not None:
-            if serie == "Serie 1" and serie1_count > 0:
-                valor = float(rubrica["serie1"]) / serie1_count
-            elif serie == "Serie 2" and serie2_count > 0:
-                valor = float(rubrica["serie2"]) / serie2_count
+        elif (rubrica.get("serie1") is not None or rubrica.get("serie2") is not None) and serie in ["Serie 1", "Serie 2"]:
+            if serie == "Serie 1" and series.get("Serie 1", 0) > 0:
+                valor = float(rubrica.get("serie1") or 0) / series["Serie 1"]
+            elif serie == "Serie 2" and series.get("Serie 2", 0) > 0:
+                valor = float(rubrica.get("serie2") or 0) / series["Serie 2"]
             else:
                 valor = total / cantidad
 
@@ -535,9 +741,9 @@ def asignar_puntajes(preguntas_raw: list, rubrica: dict) -> list:
         preguntas.append(PreguntaExamen(
             id_global=idx,
             serie=serie,
-            numero_local=p["numero_local"],
-            bloque=p["bloque"],
-            valor=round(valor, 2)
+            numero_local=p.get("numero_local"),
+            bloque=p.get("bloque", ""),
+            valor=round(float(valor), 2)
         ))
 
     return preguntas
@@ -568,13 +774,14 @@ Distribución por pregunta:
 # ============================================================
 
 def dividir_en_chunks(texto: str, tamano_chunk=900, solapamiento=120) -> list:
-    texto = " ".join(texto.split())
+    texto = " ".join((texto or "").split())
 
     if not texto:
         return []
 
     chunks = []
     inicio = 0
+    paso = max(tamano_chunk - solapamiento, 100)
 
     while inicio < len(texto):
         chunk = texto[inicio:inicio + tamano_chunk].strip()
@@ -582,50 +789,60 @@ def dividir_en_chunks(texto: str, tamano_chunk=900, solapamiento=120) -> list:
         if chunk:
             chunks.append(chunk)
 
-        inicio += tamano_chunk - solapamiento
+        inicio += paso
 
     return chunks
 
 
 def construir_rag_cache(rutas_contexto: list, texto_contexto: str):
+    rutas_contexto = normalizar_rutas(rutas_contexto)
+
+    if not rutas_contexto or not texto_contexto.strip():
+        return None
+
     cache_id = hash_archivos(rutas_contexto)
     carpeta_cache = RAG_DIR / cache_id
     carpeta_cache.mkdir(parents=True, exist_ok=True)
 
-    embedding_function = SentenceTransformerEmbeddingFunction(
-        model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    )
-
-    client = chromadb.PersistentClient(path=str(carpeta_cache))
-
-    collection = client.get_or_create_collection(
-        name=f"contexto_{cache_id[:20]}",
-        embedding_function=embedding_function
-    )
-
     try:
-        cantidad = collection.count()
-    except Exception:
-        cantidad = 0
-
-    if cantidad == 0:
-        print("🔨 Construyendo RAG por primera vez...")
-
-        chunks = dividir_en_chunks(texto_contexto)
-
-        if not chunks:
-            return None
-
-        collection.add(
-            documents=chunks,
-            ids=[f"chunk_{i}" for i in range(len(chunks))],
-            metadatas=[{"indice": i} for i in range(len(chunks))]
+        embedding_function = SentenceTransformerEmbeddingFunction(
+            model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
         )
 
-    else:
-        print("✅ RAG desde cache.")
+        client = chromadb.PersistentClient(path=str(carpeta_cache))
 
-    return collection
+        collection = client.get_or_create_collection(
+            name=f"contexto_{cache_id[:20]}",
+            embedding_function=embedding_function
+        )
+
+        try:
+            cantidad = collection.count()
+        except Exception:
+            cantidad = 0
+
+        if cantidad == 0:
+            print("🔨 Construyendo RAG por primera vez...")
+
+            chunks = dividir_en_chunks(texto_contexto)
+
+            if not chunks:
+                return None
+
+            collection.add(
+                documents=chunks,
+                ids=[f"chunk_{i}" for i in range(len(chunks))],
+                metadatas=[{"indice": i} for i in range(len(chunks))]
+            )
+
+        else:
+            print("✅ RAG desde cache.")
+
+        return collection
+
+    except Exception as e:
+        print(f"Error construyendo RAG: {e}")
+        return None
 
 
 def recuperar_contexto_pregunta(
@@ -639,8 +856,10 @@ def recuperar_contexto_pregunta(
 
     try:
         cantidad = collection.count()
-        n = min(n_resultados, cantidad)
+        if cantidad <= 0:
+            return ""
 
+        n = min(n_resultados, cantidad)
         query = re.sub(r"\s+", " ", pregunta.bloque).strip()[:650]
 
         resultados = collection.query(
@@ -700,75 +919,103 @@ CONTEXTO RELEVANTE:
 # PAQUETE DE EVALUACIÓN
 # ============================================================
 
-def preparar_paquete_evaluacion(ruta_imagen: str, rutas_contexto: list) -> dict:
-    imagen_hash = hash_archivo(ruta_imagen)
-    contexto_hash = hash_archivos(rutas_contexto)
-    paquete_hash = hashlib.sha256(
-        f"{imagen_hash}_{contexto_hash}".encode()
-    ).hexdigest()
+def preparar_paquete_evaluacion(rutas_imagenes: Union[str, Path, list], rutas_contexto: list) -> dict:
+    """
+    Función compatible con:
+    - app viejo: preparar_paquete_evaluacion(ruta_imagen, rutas_contexto)
+    - app nuevo: preparar_paquete_evaluacion([ruta1, ruta2, ruta3], rutas_contexto)
+    """
+    try:
+        rutas_imagenes = normalizar_rutas(rutas_imagenes)
+        rutas_contexto = normalizar_rutas(rutas_contexto)
 
-    cache_name = f"paquete_{paquete_hash}.json"
+        if not rutas_imagenes:
+            return {"error": "No se recibió ninguna imagen del examen."}
 
-    cache = cargar_json_cache(cache_name)
+        if not rutas_contexto:
+            return {"error": "No se recibió ningún archivo de referencia."}
 
-    if cache:
-        print("✅ Paquete desde cache.")
-        preguntas = [PreguntaExamen(**p) for p in cache["preguntas"]]
+        imagen_hash = hash_archivos(rutas_imagenes)
+        contexto_hash = hash_archivos(rutas_contexto)
+        paquete_hash = hashlib.sha256(
+            f"{imagen_hash}_{contexto_hash}".encode()
+        ).hexdigest()
 
-        return {
-            "texto_examen": cache["texto_examen"],
-            "rubrica": cache["rubrica"],
-            "preguntas": preguntas,
-            "tabla_rubrica": cache["tabla_rubrica"],
-            "contexto_por_pregunta": cache["contexto_por_pregunta"]
+        cache_name = f"paquete_{paquete_hash}.json"
+        cache = cargar_json_cache(cache_name)
+
+        if cache:
+            print("✅ Paquete desde cache.")
+            preguntas = [PreguntaExamen(**p) for p in cache["preguntas"]]
+
+            return {
+                "texto_examen": cache.get("texto_examen", ""),
+                "metadatos": cache.get("metadatos", {}),
+                "rubrica": cache.get("rubrica", {}),
+                "preguntas": preguntas,
+                "tabla_rubrica": cache.get("tabla_rubrica", ""),
+                "contexto_por_pregunta": cache.get("contexto_por_pregunta", ""),
+                "imagenes_procesadas": cache.get("imagenes_procesadas", [Path(r).name for r in rutas_imagenes]),
+            }
+
+        texto_examen = extraer_texto_varias_imagenes(rutas_imagenes)
+
+        if not texto_examen.strip():
+            return {"error": "No se pudo extraer texto del examen usando Gemini."}
+
+        if texto_examen.startswith("ERROR_IMAGEN_"):
+            return {"error": texto_examen}
+
+        if "NO HAY EXAMEN LEGIBLE" in texto_examen.upper():
+            return {"error": "No se pudo leer un examen válido en una o varias imágenes."}
+
+        metadatos = extraer_metadatos_examen(texto_examen)
+
+        texto_contexto = leer_contextos(rutas_contexto)
+
+        if not texto_contexto.strip():
+            return {"error": "Los archivos de referencia no contienen texto útil o no se pudieron leer."}
+
+        preguntas_raw = dividir_preguntas_con_series(texto_examen)
+
+        if not preguntas_raw:
+            return {"error": "No se detectaron preguntas en el examen."}
+
+        rubrica = detectar_rubrica(texto_examen)
+        preguntas = asignar_puntajes(preguntas_raw, rubrica)
+        tabla_rubrica = construir_tabla_rubrica(preguntas, rubrica)
+
+        collection = construir_rag_cache(rutas_contexto, texto_contexto)
+
+        if collection is None:
+            return {"error": "No se pudo construir o cargar el RAG del material de referencia."}
+
+        contexto_por_pregunta = construir_contexto_por_pregunta(collection, preguntas)
+
+        data_cache = {
+            "texto_examen": texto_examen,
+            "metadatos": metadatos,
+            "rubrica": rubrica,
+            "preguntas": [asdict(p) for p in preguntas],
+            "tabla_rubrica": tabla_rubrica,
+            "contexto_por_pregunta": contexto_por_pregunta,
+            "imagenes_procesadas": [Path(r).name for r in rutas_imagenes],
         }
 
-    texto_examen = extraer_texto_imagen_gemini(ruta_imagen)
+        guardar_json_cache(cache_name, data_cache)
 
-    if not texto_examen.strip():
-        return {"error": "No se pudo extraer texto del examen usando Gemini."}
+        return {
+            "texto_examen": texto_examen,
+            "metadatos": metadatos,
+            "rubrica": rubrica,
+            "preguntas": preguntas,
+            "tabla_rubrica": tabla_rubrica,
+            "contexto_por_pregunta": contexto_por_pregunta,
+            "imagenes_procesadas": [Path(r).name for r in rutas_imagenes],
+        }
 
-    if "NO HAY EXAMEN LEGIBLE" in texto_examen.upper():
-        return {"error": "No se pudo leer un examen válido en la imagen."}
-
-    texto_contexto = leer_contextos(rutas_contexto)
-
-    if not texto_contexto.strip():
-        return {"error": "Los archivos de contexto no contienen texto útil."}
-
-    preguntas_raw = dividir_preguntas_con_series(texto_examen)
-
-    if not preguntas_raw:
-        return {"error": "No se detectaron preguntas en el examen."}
-
-    rubrica = detectar_rubrica(texto_examen)
-    preguntas = asignar_puntajes(preguntas_raw, rubrica)
-    tabla_rubrica = construir_tabla_rubrica(preguntas, rubrica)
-
-    collection = construir_rag_cache(rutas_contexto, texto_contexto)
-
-    if collection is None:
-        return {"error": "No se pudo construir o cargar el RAG del material."}
-
-    contexto_por_pregunta = construir_contexto_por_pregunta(collection, preguntas)
-
-    data_cache = {
-        "texto_examen": texto_examen,
-        "rubrica": rubrica,
-        "preguntas": [asdict(p) for p in preguntas],
-        "tabla_rubrica": tabla_rubrica,
-        "contexto_por_pregunta": contexto_por_pregunta
-    }
-
-    guardar_json_cache(cache_name, data_cache)
-
-    return {
-        "texto_examen": texto_examen,
-        "rubrica": rubrica,
-        "preguntas": preguntas,
-        "tabla_rubrica": tabla_rubrica,
-        "contexto_por_pregunta": contexto_por_pregunta
-    }
+    except Exception as e:
+        return {"error": f"Error preparando paquete de evaluación: {e}"}
 
 
 # ============================================================
@@ -858,21 +1105,36 @@ No uses "Correcta" solo porque la respuesta tiene una parte verdadera; si falta 
 # ============================================================
 
 def calificar_paquete(paquete: dict, nivel_dificultad: int) -> str:
-    rubrica = paquete["rubrica"]
-    texto_examen = paquete["texto_examen"]
-    tabla_rubrica = paquete["tabla_rubrica"]
-    contexto_por_pregunta = paquete["contexto_por_pregunta"]
-    criterio = obtener_criterio_dificultad(nivel_dificultad)
+    try:
+        if not paquete:
+            return "ERROR: No se recibió paquete de evaluación."
 
-    prompt = f"""
+        if "error" in paquete:
+            return f"ERROR: {paquete['error']}"
+
+        rubrica = paquete.get("rubrica", {})
+        texto_examen = paquete.get("texto_examen", "")
+        tabla_rubrica = paquete.get("tabla_rubrica", "")
+        contexto_por_pregunta = paquete.get("contexto_por_pregunta", "")
+        metadatos = paquete.get("metadatos", {})
+        criterio = obtener_criterio_dificultad(nivel_dificultad)
+        total_rubrica = rubrica.get("total", 100)
+
+        prompt = f"""
 Eres un DOCENTE CALIFICADOR PROFESIONAL.
 Califica este examen con precisión, justicia académica y criterio humano.
 
 Usa exactamente:
 1. El texto extraído del examen.
-2. La rúbrica calculada.
-3. El contexto RAG por pregunta.
-4. El nivel de dificultad indicado.
+2. Los metadatos detectados.
+3. La rúbrica calculada.
+4. El contexto RAG por pregunta.
+5. El nivel de dificultad indicado.
+
+========================
+METADATOS DETECTADOS
+========================
+{json.dumps(metadatos, ensure_ascii=False, indent=2)}
 
 ========================
 EXAMEN EXTRAÍDO
@@ -895,12 +1157,12 @@ DIFICULTAD
 {criterio}
 
 REGLAS OBLIGATORIAS:
-- Usa exactamente el total de la rúbrica: {rubrica["total"]}.
+- Usa exactamente el total de la rúbrica: {total_rubrica}.
 - No inventes preguntas.
 - No inventes respuestas.
 - No cambies el valor máximo de cada pregunta.
 - No redistribuyas puntos si ya hay valor por pregunta.
-- No califiques sobre más de {rubrica["total"]}.
+- No califiques sobre más de {total_rubrica}.
 - Diferencia pregunta global y pregunta local.
 - Al final convierte a escala de 100.
 - La puntuación debe ser proporcional a cuánto se acerca la respuesta del estudiante a la respuesta esperada.
@@ -924,13 +1186,29 @@ Responde SOLO en Markdown:
 
 ## Resumen General
 
-**Punteo obtenido:** X/{rubrica["total"]}
+**Punteo obtenido:** X/{total_rubrica}
 
 **Nota final en escala de 100:** XX/100
 
 **Nivel de dificultad aplicado:** {nivel_dificultad}/10
 
-**Fuente de puntuación:** {rubrica["fuente"]}
+**Fuente de puntuación:** {rubrica.get("fuente", "No especificada")}
+
+## Datos Detectados del Examen
+
+**Estudiante:** ...
+
+**Código o carné:** ...
+
+**Curso:** ...
+
+**Docente:** ...
+
+**Título del examen:** ...
+
+**Serie del examen:** ...
+
+**Fecha del examen:** ...
 
 ## Detalle por Pregunta
 
@@ -973,20 +1251,23 @@ Repite el bloque anterior para cada pregunta.
 ...
 """
 
-    reporte = llamar_gemini(prompt)
+        reporte = llamar_gemini(prompt)
 
-    if not reporte.strip():
-        return "ERROR: Gemini terminó, pero no devolvió un reporte válido."
+        if not reporte.strip():
+            return "ERROR: Gemini terminó, pero no devolvió un reporte válido."
 
-    return reporte
+        return reporte
+
+    except Exception as e:
+        return f"ERROR: No se pudo calificar el paquete: {e}"
 
 
 # ============================================================
 # FUNCIÓN PARA APP.PY
 # ============================================================
 
-def calificar_examen_ui(ruta_imagen: str, rutas_contexto: list, nivel_dificultad: int) -> str:
-    paquete = preparar_paquete_evaluacion(ruta_imagen, rutas_contexto)
+def calificar_examen_ui(rutas_imagenes: Union[str, Path, list], rutas_contexto: list, nivel_dificultad: int) -> str:
+    paquete = preparar_paquete_evaluacion(rutas_imagenes, rutas_contexto)
 
     if "error" in paquete:
         return paquete["error"]
